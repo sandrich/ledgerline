@@ -67,7 +67,7 @@ export function updateWallet(
 
 /** Delete an address and everything stored for it (used when it no longer belongs to any wallet). */
 function purgeAddress(db: QDb, addressId: number): void {
-  for (const t of ['balances', 'position_values', 'aave_accounts', 'address_tokens', 'discovery_state', 'daily_flags']) {
+  for (const t of ['balances', 'position_values', 'aave_accounts', 'curve_positions', 'address_tokens', 'discovery_state', 'daily_flags']) {
     if (!get(db, "SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?", t)) continue;
     db.prepare(`DELETE FROM ${t} WHERE address_id = ?`).run(addressId);
   }

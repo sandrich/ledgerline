@@ -15,7 +15,7 @@ PnL, risk metrics and an activity ledger.
 - **Two processes, one database:** the web app (UI + `/api/*` route handlers) and a long-running
   worker (`worker/index.ts`, run with `tsx`) share one SQLite file in WAL mode.
 - **External data:** JSON-RPC (Alchemy when configured, public endpoints as fallback), DefiLlama
-  (prices, block by timestamp), Frankfurter (USD/CHF), Blockscout (Ethereum token discovery), Safe
+  (prices, block by timestamp), Frankfurter (USD/EUR, USD/CHF), Blockscout (Ethereum token discovery), Safe
   transaction service (Safe balances), Tenderly gateway (keyless full-range logs).
 
 ## Commands
@@ -40,14 +40,15 @@ backfill against the configured database. They hit real RPC endpoints.
 |---|---|
 | `app/` | Pages (`/`, `/wallets`, `/wallets/[id]`, `/address/[address]`, `/transactions`) and `app/api/**/route.ts` handlers. `app/api/_lib/http.ts` has the shared JSON/error helpers |
 | `components/views/` | Page-level views (portfolio, address, manage, transactions) and shared parts |
-| `components/charts/` | Hand-rolled SVG charts (area, sparkline, history card). No chart library |
+| `components/charts/` | Hand-rolled SVG charts (area with the unleveraged line, multi-line for rates / FX, yield bars, sparkline, history card). No chart library |
 | `components/format.ts` | **All** display formatting and the stealth mask |
 | `components/layout/` | `Providers` (currency, FX, stealth, toasts) and the top bar |
 | `styles/` | `tokens.css` (design tokens, light and dark) and `app.css`. Plain CSS, no Tailwind |
 | `lib/scan/` | Live side: token discovery, live snapshots, latest-state RPC pools, job dispatch, env/db bootstrap, logger, spam filter, valuation |
 | `lib/history/` | History side: archive RPC pool, Multicall3, daily backfill, hourly backfill, Aave reader, DefiLlama prices, canonical price keys, rollup and retention |
 | `lib/ledger/` | Activity ledger: raw sources (Transfer/Approval logs, `alchemy_getAssetTransfers`), ingest, classification, read model |
-| `lib/queries/` | Read models used by the API: scope parsing, aggregation and dedup across wallets, history series, PnL, risk, flows |
+| `lib/protocols/` | Protocol adapters beyond Aave: `curve-crvusd.ts` (Curve crvUSD mint markets and LlamaLend loans: market registry, per-address loan discovery from UserState logs, point reads used by live, daily and hourly) |
+| `lib/queries/` | Read models used by the API: scope parsing, aggregation and dedup across wallets, history series, PnL (`scope-pnl.ts` backs `GET /api/pnl?scope=` for list rows), risk, flows, yield / rates, suggestions |
 | `lib/queries/api-types.ts` | **THE API contract** between route handlers and UI. Every response shape lives here |
 | `lib/db/` | `schema.sql`, versioned migrations (`migrate.ts`) and repositories (`repos-*.ts`) |
 | `worker/index.ts` | Scheduler (intervals from env, last run persisted in `meta`), two lanes (scan, history), heartbeat, graceful shutdown |
@@ -62,8 +63,11 @@ backfill against the configured database. They hit real RPC endpoints.
   `lib/db/migrate.ts`. Never edit or reorder an existing step: deployed databases have already run it.
   The version lives in `PRAGMA user_version`; each step runs inside `BEGIN IMMEDIATE` and re-checks
   the version so web and worker can start at the same time.
-- Keep `lib/db/schema.sql` in sync with the result of all migrations. The test suites build their own
-  inline schema (`lib/queries/__tests__/queries.test.ts`), so a schema change may need it updated too.
+- `lib/db/schema.sql` is the base schema run by migration 1 (fx already in its current shape). Tables
+  added later (Aave reserve state, ledger, bridge pairs, smart wallet suggestions, Curve markets and
+  positions, Aave rates) live in their own migration step with `CREATE TABLE IF NOT EXISTS`; read
+  `migrate.ts` for the full schema. The test suites build their own inline schema
+  (`lib/queries/__tests__/queries.test.ts`), so a schema change may need it updated too.
 - Money is stored in **USD**, timestamps in **unix seconds**.
 
 ### RPC
@@ -92,6 +96,11 @@ backfill against the configured database. They hit real RPC endpoints.
   **negative** for debt, while summary fields such as `debtUsd`, `borrowedUsd` and `withdrawalsUsd`
   are **positive** numbers. Read the doc comment on each field in `api-types.ts` before using it.
 - Aave aTokens are valued as their underlying; variable debt tokens as negative underlying.
+- Ledger kinds: only value exchanged with externally owned accounts (and unpaired Arbitrum bridge legs)
+  is a deposit / withdrawal. Legs with Aave reserves and Curve crvUSD / LlamaLend controllers, AMMs and
+  vaults (`curve_markets`) become `aave-*` / `curve-*` kinds; other contracts are `other` or `swap`.
+- `balances.protocol` / `position_values.protocol` is `wallet`, `aave-v3`, `curve-crvusd` or `llamalend`. Curve loans use the AMM
+  (collateral) and Controller (debt, soft liquidation part) addresses as pseudo tokens with `tokens.market` set to the market key.
 
 ### PnL and ROI
 
@@ -102,7 +111,16 @@ These definitions are deliberate. Do not "simplify" them into net-worth change.
   and deposits never show up as profit or loss.
 - `returnPct`: `pnlUsd / (startUsd + peak cumulative net deposits in the window)`; `null` when that
   capital is below $1.
-- `otherUsd = changeUsd - pnlUsd`: deposits, withdrawals, Aave interest and fees (a mixed bucket).
+- `interestUsd` (Aave interest earned - paid, `lib/queries/yield.ts`) and `gasUsd` (positive cost) are
+  reported separately; `otherUsd = changeUsd - pnlUsd - interestUsd + gasUsd` (deposits and
+  withdrawals). Without yield data the two fields are absent and `otherUsd = changeUsd - pnlUsd`.
+- Interest is measured as balance change minus principal from the ledger; Aave aToken / debt token
+  mint and burn `Transfer` amounts include accrued interest and are never principal. The daily reserve
+  indices (`aave_rates`) cross-check it and are the fallback.
+- `unleveredUsd` on history points: the same deposits / withdrawals, but the gross assets' price
+  return instead of the leveraged one (equals `total` without debt).
+- Currency split (`PnlPeriod.currencies`): market = sum of pnl_t x rate_t, currency effect = sum of
+  netWorth_{t-1} x (rate_t - rate_{t-1}), other = the rest; the parts sum exactly to the change.
 
 ### UI and formatting
 
@@ -113,7 +131,10 @@ These definitions are deliberate. Do not "simplify" them into net-worth change.
 - Swiss number conventions: apostrophe thousands separator (`1'234'567.89`), dates as `dd.mm.yyyy`,
   subscript zeros for tiny amounts (`0.0₅12`), `-` for empty values. Prices in CHF are written like
   `CHF 100.-` in prose.
-- Display currency is USD or CHF, converted with the daily USD/CHF rate of the point's day.
+- Display currency is USD, EUR or CHF, converted with the selected currency's daily rate of the point's day
+  (`rateAt` in `Providers`). EUR renders as `€36'428`, CHF as `CHF 36'428.-`. Values from
+  `PnlPeriod.currencies` are already in the display currency: format them with rate 1
+  (`components/views/pnl-display.ts`).
 - Use design tokens from `styles/tokens.css`; both light and dark themes must keep working.
 
 ### API contract
@@ -135,7 +156,9 @@ These definitions are deliberate. Do not "simplify" them into net-worth change.
   (`DatabaseSync`) on a **temporary database** created per suite. They make no network calls.
 - New query or ledger logic needs a test next to the existing ones (`lib/*/__tests__/`), and new test
   files must be added to the `test` script in `package.json`.
-- For manual checks use the demo database (`npm run demo:data`).
+- For manual checks use the demo database (`npm run demo:data`). It exercises every feature (leveraged Aave
+  position with rate history, Curve loan, EUR / CHF, bridge pair, gas, a pending suggestion); README
+  screenshots in `docs/images/` are taken from it, never from a real database.
 - **Never point tests, scripts or experiments at a production database.** Copy it first if you must.
 
 ## Safety

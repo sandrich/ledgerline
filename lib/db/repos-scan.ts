@@ -1,7 +1,7 @@
 // Repository functions for lib/scan (discovery, live snapshot) and the worker job queue.
 // Written against the lib/db/schema.sql column names and the conventions of lib/db/repos-history.ts:
 // unix SECONDS, lowercase addresses, native coin = zero address, balances.usd negative for borrows,
-// position_values.protocol 'wallet' | 'aave-v3' with a 'wallet' row always written per slice.
+// position_values.protocol 'wallet' | 'aave-v3' | 'curve-crvusd' | 'llamalend' with a 'wallet' row always written per slice.
 // Inserts use WHERE NOT EXISTS so they do not depend on particular UNIQUE constraints.
 import type { Db, HistoryChain } from '../history/types';
 
@@ -253,7 +253,8 @@ export interface ScanBalanceRow {
   amountRaw: string;
   amount: number;
   usd: number;
-  protocol: 'wallet' | 'aave-v3';
+  /** 'wallet', 'aave-v3', 'curve-crvusd' or 'llamalend' (free text in the database) */
+  protocol: string;
   side: 'wallet' | 'supply' | 'borrow';
 }
 

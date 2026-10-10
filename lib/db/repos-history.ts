@@ -290,21 +290,23 @@ export function histSetMeta(db: Db, key: string, value: string): void {
   })();
 }
 
+// fx: per (day, currency) units of the currency per USD since migration 7; these helpers are the CHF
+// row (lib/history/prices.ts syncs every display currency).
 export function histFxMaxDay(db: Db): string | null {
-  const r = db.prepare('SELECT MAX(day) AS d FROM fx').get() as { d: string | null };
+  const r = db.prepare("SELECT MAX(day) AS d FROM fx WHERE currency = 'CHF'").get() as { d: string | null };
   return r?.d ?? null;
 }
 
 export function histFxMinDay(db: Db): string | null {
-  const r = db.prepare('SELECT MIN(day) AS d FROM fx').get() as { d: string | null };
+  const r = db.prepare("SELECT MIN(day) AS d FROM fx WHERE currency = 'CHF'").get() as { d: string | null };
   return r?.d ?? null;
 }
 
 export function histInsertFx(db: Db, rows: { day: string; usdChf: number }[]): number {
-  const stmt = db.prepare('INSERT INTO fx (day, usd_chf) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM fx WHERE day = ?)');
+  const stmt = db.prepare("INSERT OR IGNORE INTO fx (day, currency, rate_from_usd) VALUES (?, 'CHF', ?)");
   let n = 0;
   db.transaction(() => {
-    for (const r of rows) n += stmt.run(r.day, r.usdChf, r.day).changes;
+    for (const r of rows) n += Number(stmt.run(r.day, r.usdChf).changes);
   })();
   return n;
 }

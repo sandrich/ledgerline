@@ -5,6 +5,7 @@ import { useState } from 'react';
 import type { LiquidationPoint, PnlSummary, PnlWindow, RiskSummary } from '../../lib/queries/api-types';
 import { fmtMoney, fmtPct, fmtPrice, fmtShare, fmtUnits, fmtUtcDate } from '../format';
 import { useApp } from '../layout/Providers';
+import { pnlDisplay } from './pnl-display';
 import { SignedPct } from './parts';
 
 const WINDOWS: { key: PnlWindow; label: string }[] = [
@@ -37,11 +38,15 @@ export function PnlCard({
   const [own, setOwn] = useState<PnlWindow>('30d');
   const sel = range ?? own;
   const setSel = (w: PnlWindow) => (onRange ? onRange(w) : setOwn(w));
-  const money = (v: number | null | undefined) => fmtMoney(v != null && Math.abs(v) < 0.5 ? 0 : v, currency, rate, { sign: true, decimals: 0 });
+  // display values are already in the selected currency: rate 1
+  const money = (v: number | null | undefined) => fmtMoney(v != null && Math.abs(v) < 0.5 ? 0 : v, currency, 1, { sign: true, decimals: 0 });
   const cur = pnl?.[sel];
+  const d = pnlDisplay(cur, currency, rate);
+  const fxMode = currency !== 'USD';
   const contrib = cur?.byAsset ?? [];
   const max = Math.max(...contrib.map((c) => Math.abs(c.pnlUsd)), 1);
   const selLabel = WINDOWS.find((w) => w.key === sel)?.label ?? sel;
+  const hasYield = d != null && d.interest != null;
 
   return (
     <section className={`${className} pnl-card`} aria-labelledby="pnl-h">
@@ -50,23 +55,29 @@ export function PnlCard({
           <i className="ph ph-chart-bar" aria-hidden="true" />
           PnL
         </h3>
-        <span className="hint">price moves on holdings</span>
+        <span className="hint">{fxMode ? `in ${currency}, price and currency moves` : 'price moves on holdings'}</span>
       </div>
       {!pnl ? (
         <div className="empty slim">PnL is not available yet</div>
       ) : (
         <>
+          <div className="pnl-scroll">
           <table className="pnl-table">
             <thead>
               <tr>
                 <th scope="col">Window</th>
-                <th scope="col" className="r">
+                <th scope="col" className="r" title={fxMode ? `Price PnL plus the USD/${currency} effect` : 'Price moves on holdings'}>
                   PnL
                 </th>
-                <th scope="col" className="r" title="Return on invested capital: PnL / (start value + net deposits)">
+                {fxMode && (
+                  <th scope="col" className="r" title={`Of the PnL: USD moving against ${currency} (net worth held x change of the rate)`}>
+                    Currency
+                  </th>
+                )}
+                <th scope="col" className="r" title="Return on invested capital in USD: PnL / (start value + net deposits)">
                   ROI
                 </th>
-                <th scope="col" className="r">
+                <th scope="col" className="r" title={hasYield ? 'Deposits and withdrawals' : 'Deposits, withdrawals, interest and fees'}>
                   Other
                 </th>
               </tr>
@@ -74,6 +85,7 @@ export function PnlCard({
             <tbody>
               {WINDOWS.map((w) => {
                 const p = pnl[w.key];
+                const pd = pnlDisplay(p, currency, rate);
                 const on = w.key === sel;
                 return (
                   <tr key={w.key} className={on ? 'on' : undefined} onClick={() => setSel(w.key)}>
@@ -82,18 +94,56 @@ export function PnlCard({
                         {w.label}
                       </button>
                     </th>
-                    <td className={`r num ${signedTone(p?.pnlUsd)}`}>{money(p?.pnlUsd)}</td>
+                    <td className={`r num ${signedTone(pd?.pnl)}`}>{money(pd?.pnl)}</td>
+                    {fxMode && <td className={`r num ${signedTone(pd?.fx)}`}>{money(pd?.fx)}</td>}
                     <td className={`r num ${signedTone(p?.returnPct, 0.00005)}`}>{fmtPct(p?.returnPct, 2)}</td>
-                    <td className="r num dim">{money(p?.otherUsd)}</td>
+                    <td className="r num dim">{money(pd?.other)}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+          </div>
+
+          {d && d.change != null && (
+            <div className="pnl-parts">
+              <h4>
+                Where the change came from <span className="muted small">{selLabel}</span>
+              </h4>
+              <dl className="parts-dl">
+                <div>
+                  <dt>Market PnL</dt>
+                  <dd className={`num ${signedTone(d.market)}`}>{money(d.market)}</dd>
+                </div>
+                {fxMode && (
+                  <div>
+                    <dt title={`USD gaining against ${currency} raises the ${currency} value of what you hold`}>Currency effect</dt>
+                    <dd className={`num ${signedTone(d.fx)}`}>{d.fx != null ? money(d.fx) : '-'}</dd>
+                  </div>
+                )}
+                <div>
+                  <dt title={cur?.interestEstimated ? 'Estimated from rates' : 'Aave interest earned minus paid'}>Interest{cur?.interestEstimated ? ' (est.)' : ''}</dt>
+                  <dd className={`num ${signedTone(d.interest)}`}>{d.interest != null ? money(d.interest) : '-'}</dd>
+                </div>
+                <div>
+                  <dt>Gas</dt>
+                  <dd className={`num ${d.gas != null && d.gas >= 0.5 ? 'neg' : 'muted'}`}>{d.gas != null ? money(-d.gas) : '-'}</dd>
+                </div>
+                <div>
+                  <dt>{hasYield ? 'Deposits / withdrawals' : 'Deposits / other'}</dt>
+                  <dd className="num dim">{money(d.other)}</dd>
+                </div>
+                <div className="parts-total">
+                  <dt>Change</dt>
+                  <dd className={`num ${signedTone(d.change)}`}>{money(d.change)}</dd>
+                </div>
+              </dl>
+            </div>
+          )}
 
           <div className="pnl-contrib">
             <h4>
-              Top contributors <span className="muted small">{selLabel}</span>
+              Top contributors <span className="muted small">{selLabel}, price PnL</span>
             </h4>
             {!contrib.length ? (
               <div className="muted small">No price moves in this window</div>
@@ -105,14 +155,15 @@ export function PnlCard({
                     <span className="c-bar" aria-hidden="true">
                       <span className={c.pnlUsd < 0 ? 'neg' : 'pos'} style={{ width: `${(Math.abs(c.pnlUsd) / max) * 100}%` }} />
                     </span>
-                    <span className={`c-val num ${signedTone(c.pnlUsd)}`}>{money(c.pnlUsd)}</span>
+                    <span className={`c-val num ${signedTone(c.pnlUsd)}`}>{fmtMoney(Math.abs(c.pnlUsd) < 0.5 ? 0 : c.pnlUsd, currency, rate, { sign: true, decimals: 0 })}</span>
                   </li>
                 ))}
               </ol>
             )}
           </div>
           <p className="footnote">
-            PnL counts price moves on what you held. ROI is PnL over start value plus net deposits. Other is deposits, withdrawals, interest and fees. Transfers between your own addresses are not profit.
+            PnL counts price moves on what you held{fxMode ? `, plus USD moving against ${currency}` : ''}. ROI is PnL over start value plus net deposits. Interest is Aave interest earned minus paid, gas
+            what your addresses paid. Transfers between your own addresses are not profit.
           </p>
         </>
       )}
@@ -136,7 +187,20 @@ function Stat({ label, value, sub, children }: { label: string; value: React.Rea
   );
 }
 
-export function RiskCard({ risk, hasAave, netUsd, className = 'card span-7' }: { risk?: RiskSummary | null; hasAave: boolean; netUsd?: number; className?: string }) {
+export function RiskCard({
+  risk,
+  hasAave,
+  hasDebt = false,
+  netUsd,
+  className = 'card span-7',
+}: {
+  risk?: RiskSummary | null;
+  hasAave: boolean;
+  /** Aave debt exists: missing LTV / liquidation data then means rates are not captured yet, not "no debt" */
+  hasDebt?: boolean;
+  netUsd?: number;
+  className?: string;
+}) {
   const { currency, rate } = useApp();
   const r = risk ?? null;
   const ltv = r?.ltvUsed ?? null;
@@ -166,7 +230,7 @@ export function RiskCard({ risk, hasAave, netUsd, className = 'card span-7' }: {
         <>
           <div className="stats">
             <Stat label="Leverage" value={r.leverage != null ? <span className="num">{r.leverage.toFixed(2)}x</span> : '-'} sub="assets / net worth" />
-            <Stat label="LTV used" value={<span className="num">{fmtShare(ltv)}</span>} sub={ltv == null ? (hasAave ? 'no debt' : 'no Aave positions') : 'of borrowing power'}>
+            <Stat label="LTV used" value={<span className="num">{fmtShare(ltv)}</span>} sub={ltv == null ? (hasDebt ? 'rates pending' : hasAave ? 'no debt' : 'no Aave positions') : 'of borrowing power'}>
               <span className={`stat-meter ltv-${ltv == null ? 'ok' : ltv > 0.85 ? 'danger' : ltv > 0.7 ? 'warn' : 'ok'}`} aria-hidden="true">
                 <span style={{ width: `${Math.min(1, Math.max(0, ltv ?? 0)) * 100}%` }} />
               </span>
@@ -177,6 +241,8 @@ export function RiskCard({ risk, hasAave, netUsd, className = 'card span-7' }: {
               sub={
                 !hasAave ? (
                   'no Aave positions'
+                ) : r.supplyApy == null && r.borrowApy == null ? (
+                  'rates pending'
                 ) : (
                 <>
                   supply <span className="num">{fmtShare(r.supplyApy, 2)}</span>
@@ -193,7 +259,9 @@ export function RiskCard({ risk, hasAave, netUsd, className = 'card span-7' }: {
             <div>
               <h4>Liquidation prices</h4>
               {!liqs.length ? (
-                <div className="muted small">{hasAave ? 'No debt, nothing to liquidate' : 'No Aave positions'}</div>
+                <div className="muted small">
+                  {hasDebt ? 'Rates pending: liquidation prices appear after the next live scan' : hasAave ? 'No debt, nothing to liquidate' : 'No Aave positions'}
+                </div>
               ) : (
                 <table className="mini-table">
                   <thead>

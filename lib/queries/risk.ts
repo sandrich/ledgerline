@@ -131,7 +131,8 @@ export function positionRisks(
 ): Map<string, PositionRisk> {
   const byPos = new Map<string, { addressId: number; market: string; chain: Chain; rows: PosRow[] }>();
   for (const b of balances) {
-    if (b.side === 'wallet') continue;
+    // FRONTEND: only Aave markets have reserve rates and liquidation thresholds
+    if (b.side === 'wallet' || b.protocol !== 'aave-v3') continue;
     const t = tokenMeta(tokens, b.chain, b.token);
     const market = t?.market ?? `${b.chain}-unknown`;
     const k = `${b.addressId}|${market}`;

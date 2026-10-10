@@ -50,6 +50,8 @@ export const CANONICAL_LABELS: Record<string, { symbol: string; name: string }> 
 export const PROTOCOL_LABELS: Record<string, string> = {
   wallet: 'Wallet',
   'aave-v3': 'Aave V3',
+  'curve-crvusd': 'Curve crvUSD',
+  llamalend: 'LlamaLend',
 };
 
 export const CHAIN_LABELS: Record<Chain, string> = {

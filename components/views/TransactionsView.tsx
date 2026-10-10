@@ -17,6 +17,7 @@ const KIND_GROUPS: { key: string; label: string; kinds: TxKind[] | null }[] = [
   { key: 'internal', label: 'Internal', kinds: ['internal'] },
   { key: 'swap', label: 'Swaps', kinds: ['swap'] },
   { key: 'aave', label: 'Aave', kinds: ['aave-supply', 'aave-withdraw', 'aave-borrow', 'aave-repay'] },
+  { key: 'curve', label: 'Curve', kinds: ['curve-borrow', 'curve-repay', 'curve-deposit', 'curve-withdraw'] },
   { key: 'approval', label: 'Approvals', kinds: ['approval'] },
   { key: 'other', label: 'Other', kinds: ['other'] },
 ];
@@ -44,6 +45,8 @@ export function TransactionsView() {
   const [chain, setChain] = useState<Chain | 'all'>('all');
   const [hideInternal, setHideInternal] = useState(false);
   const [includeSpam, setIncludeSpam] = useState(false);
+  // approvals and zero value contract calls are hidden by the API unless asked for
+  const [includeApprovals, setIncludeApprovals] = useState(false);
   const [items, setItems] = useState<TxRow[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [first, setFirst] = useState<TransactionsResponse | null>(null);
@@ -59,8 +62,9 @@ export function TransactionsView() {
     if (chain !== 'all') q.set('chain', chain);
     if (hideInternal) q.set('hideInternal', '1');
     if (includeSpam) q.set('includeSpam', '1');
+    if (includeApprovals) q.set('includeApprovals', '1');
     return `/api/transactions?${q.toString()}`;
-  }, [scope, group, chain, hideInternal, includeSpam]);
+  }, [scope, group, chain, hideInternal, includeSpam, includeApprovals]);
 
   const load = useCallback(
     async (cur: string | null) => {
@@ -113,7 +117,7 @@ export function TransactionsView() {
   })();
   const addressScope = scope.startsWith('address:') ? scope : null;
   const flows = first?.flows ?? null;
-  const filtered = group !== 'all' || chain !== 'all' || hideInternal;
+  const filtered = group !== 'all' || chain !== 'all' || hideInternal || includeApprovals;
 
   // group rows by local day
   const days: { key: string; ts: number; rows: TxRow[] }[] = [];
@@ -200,6 +204,10 @@ export function TransactionsView() {
             <input type="checkbox" checked={hideInternal} onChange={(e) => setHideInternal(e.target.checked)} />
             Hide internal
           </label>
+          <label className="toggle" title="Token approvals and contract calls that move no tokens">
+            <input type="checkbox" checked={includeApprovals} onChange={(e) => setIncludeApprovals(e.target.checked)} />
+            Show approvals
+          </label>
           <label className="toggle">
             <input type="checkbox" checked={includeSpam} onChange={(e) => setIncludeSpam(e.target.checked)} />
             Include spam
@@ -254,7 +262,7 @@ export function TransactionsView() {
             <div className="table-foot">
               <span>
                 <span className="num">{items.length}</span> transaction{items.length === 1 ? '' : 's'} shown
-                {!includeSpam ? ', spam hidden' : ''}
+                {!includeSpam && !includeApprovals ? ', spam and approvals hidden' : !includeSpam ? ', spam hidden' : !includeApprovals ? ', approvals hidden' : ''}
               </span>
               {cursor ? (
                 <button className="btn" type="button" onClick={() => void load(cursor)} disabled={more}>

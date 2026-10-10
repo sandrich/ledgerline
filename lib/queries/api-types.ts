@@ -185,10 +185,22 @@ export interface PnlPeriod {
    * capital is below $1.
    */
   returnPct: number | null;
-  /** changeUsd - pnlUsd: deposits, withdrawals, Aave interest and fees (mixed bucket) */
+  /**
+   * changeUsd - pnlUsd - interestUsd + gasUsd: deposits and withdrawals (plus fees paid in tokens).
+   * Without interestUsd / gasUsd (no yield data) it is changeUsd - pnlUsd and still holds interest.
+   */
   otherUsd: number | null;
   /** largest contributors to pnlUsd by canonical asset, sorted by |pnlUsd| desc, max 5 */
   byAsset: { asset: string; symbol: string; pnlUsd: number }[];
+  // ---------- YIELD + FX (optional, lib/queries/yield.ts, lib/queries/fx.ts) ----------
+  /** net Aave interest in the window (earned - paid), USD at the time; negative when borrowing costs more */
+  interestUsd?: number;
+  /** gas paid by addresses of the scope in the window, positive USD (already part of changeUsd) */
+  gasUsd?: number;
+  /** true when interest was estimated from rates instead of measured (ledger or on-chain indices) */
+  interestEstimated?: boolean;
+  /** the same window in other display currencies (USD values converted at the day's rate) */
+  currencies?: Partial<Record<FxCurrency, CurrencyPnl>>;
 }
 
 export type PnlSummary = Record<PnlWindow, PnlPeriod>;
@@ -289,7 +301,8 @@ export interface TokenRow {
 }
 
 export interface ProtocolPosition {
-  protocol: 'aave-v3';
+  /** Curve markets carry the loan detail in AddressDetailResponse.curve (health, soft liquidation) */
+  protocol: 'aave-v3' | 'curve-crvusd' | 'llamalend';
   market: string;
   chain: Chain;
   supplied: TokenRow[];
@@ -324,6 +337,14 @@ export interface HistoryPoint {
   assetsUsd?: number;
   /** positive number; total - assetsUsd = -debtUsd */
   debtUsd?: number;
+  // ---------- YIELD + FX ----------
+  /**
+   * Unleveraged comparison line (USD): starts at the net worth of the range's first point and moves
+   * by the price return of the gross assets only (wallet + supplied, as if held without debt) plus
+   * the same deposits / withdrawals / interest the net worth gets. Equals total when there is no
+   * debt; above total when leverage lost money, below when it gained. Set on every point.
+   */
+  unleveredUsd?: number;
 }
 
 export interface HistoryResponse {
@@ -347,8 +368,16 @@ export interface PricesResponse {
 }
 
 export interface FxResponse {
-  latest: { day: string; usdChf: number } | null;
+  /**
+   * Latest published day. usdChf is the legacy CHF field (same value as CHF); EUR / CHF are units of
+   * the currency per USD (null when that currency has no rate yet). day = latest day of any currency.
+   */
+  latest: { day: string; usdChf: number; EUR?: number | null; CHF?: number | null } | null;
+  /** legacy: USD -> CHF per day (YYYY-MM-DD). Use `rates.CHF` for new code. */
   daily: Record<string, number>;
+  // ---------- YIELD + FX ----------
+  /** units of the currency per USD per day (YYYY-MM-DD, every calendar day up to the last published one) */
+  rates?: Record<FxCurrency, Record<string, number>>;
 }
 
 export interface HealthResponse {
@@ -390,6 +419,11 @@ export type TxKind =
   | 'aave-withdraw'
   | 'aave-borrow'
   | 'aave-repay'
+  // Curve crvUSD / LlamaLend loan actions (lib/ledger/classify.ts, legs with a controller / AMM / vault)
+  | 'curve-borrow'
+  | 'curve-repay'
+  | 'curve-deposit'
+  | 'curve-withdraw'
   | 'approval'
   | 'spam'
   | 'other';
@@ -436,7 +470,11 @@ export interface TxRow {
 }
 
 export interface FlowSummary {
-  /** external value received (USD at the time), excluding transfers between tracked addresses and protocol (Aave) movements */
+  /**
+   * external value received (USD at the time): only value from externally owned accounts (and unpaired
+   * Arbitrum bridge legs), netted per transaction. Transfers between tracked addresses, paired bridges,
+   * protocol (Aave, Curve) movements, swaps and contract interactions never count (lib/ledger/classify.ts).
+   */
   depositsUsd: number;
   /** positive number */
   withdrawalsUsd: number;
@@ -452,4 +490,217 @@ export interface TransactionsResponse {
   flows: FlowSummary | null;
   /** true while the ledger backfill for some address in scope is still running */
   syncing: boolean;
+}
+
+// ---------- YIELD + FX (Aave rates, interest, gas, display currencies) ----------
+
+/** Display currencies other than USD (all money is stored in USD). */
+export type FxCurrency = 'EUR' | 'CHF';
+export const FX_CURRENCIES: FxCurrency[] = ['EUR', 'CHF'];
+export type DisplayCurrency = 'USD' | FxCurrency;
+
+/**
+ * One PnL window in a display currency C. All values are amounts of C (not USD); rates are units
+ * of C per USD. change = end - start = market + fxEffect + interest - gas + other exactly.
+ */
+export interface CurrencyPnl {
+  currency: FxCurrency;
+  rateStart: number;
+  rateEnd: number;
+  /** net worth at the window start, converted at that day's rate */
+  start: number;
+  end: number;
+  change: number;
+  /** price PnL converted at each point's day */
+  market: number;
+  /** currency effect: net worth held x the change of the rate (USD gaining against C is positive) */
+  fxEffect: number;
+  /** net Aave interest converted per day; null without yield data (then it is inside other) */
+  interest: number | null;
+  /** gas converted per day, positive cost; null without yield data */
+  gas: number | null;
+  /** deposits / withdrawals (and interest / gas when those are null) */
+  other: number;
+}
+
+export interface RatePoint {
+  t: number;
+  /** fractions (0.031 = 3.1%), null when unknown */
+  supplyApy: number | null;
+  borrowApy: number | null;
+}
+
+/** Rate history of one Aave reserve held (supplied or borrowed) by the scope in the range. */
+export interface ReserveRateSeries {
+  chain: Chain;
+  market: string;
+  /** underlying token (lowercase) */
+  asset: string;
+  symbol: string;
+  supplied: boolean;
+  borrowed: boolean;
+  points: RatePoint[];
+}
+
+export interface RatesResponse {
+  scope: string;
+  range: HistoryRange;
+  from: number;
+  to: number;
+  reserves: ReserveRateSeries[];
+  /**
+   * Scope net APY per point (fraction): (supplied usd x supply APY - borrowed usd x borrow APY) /
+   * (supplied usd - borrowed usd) over the scope's Aave positions; null without positions or equity.
+   */
+  netApy: { t: number; netApy: number | null }[];
+}
+
+export interface YieldAsset {
+  /** canonical asset id, e.g. 'ETH', 'USD' */
+  asset: string;
+  symbol: string;
+  /** supply interest, USD at the time (positive = earned) */
+  earnedUsd: number;
+  /** borrow interest, USD at the time (positive = paid) */
+  paidUsd: number;
+}
+
+export interface YieldBucket {
+  /** bucket start (UTC day or Monday week start), unix seconds */
+  t: number;
+  earnedUsd: number;
+  paidUsd: number;
+  gasUsd: number;
+  /** earned - paid - gas */
+  netUsd: number;
+  /** running sum of netUsd from the range start */
+  cumulativeUsd: number;
+}
+
+export interface YieldResponse {
+  scope: string;
+  range: HistoryRange;
+  from: number;
+  to: number;
+  /** supply interest, positive USD */
+  earnedUsd: number;
+  /** borrow interest, positive USD */
+  paidUsd: number;
+  /** gas paid by addresses of the scope (tx.fee_usd of transactions they sent), positive USD */
+  gasUsd: number;
+  /** earned - paid - gas */
+  netUsd: number;
+  /**
+   * How interest was measured: 'ledger' (balance change minus supplies / withdrawals / borrows /
+   * repays from the transactions ledger), 'index' (balance x growth of the on-chain reserve index),
+   * 'estimate' (balance x APY x time), 'mixed' when segments used different methods, 'none' without
+   * Aave positions.
+   */
+  method: 'ledger' | 'index' | 'estimate' | 'mixed' | 'none';
+  /** true when any part used the APY estimate */
+  estimated: boolean;
+  /** false until the ledger has been ingested for an address of the scope (gas is then 0) */
+  gasKnown: boolean;
+  byAsset: YieldAsset[];
+  bucket: 'day' | 'week';
+  buckets: YieldBucket[];
+}
+
+// ---------- LEDGER: smart wallet suggestions (GET / POST /api/suggestions) ----------
+
+/** 'safe' = Safe transaction service owners lookup, 'dsproxy' = DeFi Saver / Maker DSProxy registry. */
+export type SuggestionSource = 'safe' | 'dsproxy';
+
+/** A smart wallet (Safe, DSProxy) owned by a tracked EOA that is not tracked yet on `chain`. */
+export interface WalletSuggestion {
+  id: number;
+  /** lowercase */
+  address: string;
+  chain: Chain;
+  source: SuggestionSource;
+  /** the tracked EOA that owns it */
+  owner: { addressId: number; address: string; label: string | null };
+  /** wallets the address is added to on accept (the owner's wallets) */
+  wallets: { id: number; name: string }[];
+  /** unix seconds */
+  createdAt: number | null;
+}
+
+export interface SuggestionsResponse {
+  suggestions: WalletSuggestion[];
+}
+
+export interface SuggestionActionResponse {
+  id: number;
+  status: 'accepted' | 'dismissed';
+  /** the tracked address after accepting, null on dismiss */
+  addressId: number | null;
+  /** discovery / live jobs enqueued for the added address */
+  jobIds: number[];
+}
+
+// ---------- CRVUSD: Curve crvUSD mint markets and LlamaLend (lib/protocols/curve-crvusd.ts) ----------
+// Balance rows of these positions use protocol 'curve-crvusd' (mint) or 'llamalend' and the generic
+// sides (supply = collateral and soft liquidation part, borrow = debt), so totals, PnL, history and net
+// exposure include them without the fields below. The fields below carry the protocol specific detail.
+
+export type CurveProtocolKey = 'curve-crvusd' | 'llamalend';
+
+/** One Curve crvUSD / LlamaLend loan of an address (from curve_positions of the current slice). */
+export interface CurvePositionInfo {
+  addressId: number;
+  chain: Chain;
+  protocol: CurveProtocolKey;
+  /** market key, e.g. eth-crvusd-3-weth (also tokens.market of the position rows) */
+  market: string;
+  collateralSymbol: string;
+  borrowedSymbol: string;
+  /** collateral units */
+  collateral: number;
+  /** borrowed token units held in the AMM bands (soft liquidation), 0 outside soft liquidation */
+  stablecoin: number;
+  /** debt in borrowed token units */
+  debt: number;
+  /** USD, positive: collateral + soft liquidation part */
+  collateralUsd: number;
+  /** USD, positive */
+  debtUsd: number;
+  /** Curve health(user, true) as a fraction: 0 = liquidation line, 0.1 = 10% headroom; null without a loan */
+  health: number | null;
+  /** 1 + health: the same headroom on the Aave health factor scale (1 = liquidation) */
+  healthFactorLike: number | null;
+  /** true while part of the collateral is converted to the borrowed token (stablecoin > 0) */
+  softLiquidation: boolean;
+  /** AMM borrow APY (fraction), live snapshots only */
+  borrowApy: number | null;
+}
+
+// Optional additions to existing responses (declaration merging keeps the original declarations untouched).
+export interface AddressDetailResponse {
+  /** CRVUSD: Curve crvUSD / LlamaLend loans of the address; absent until the read model fills it */
+  curve?: CurvePositionInfo[];
+}
+
+export interface PortfolioView {
+  /** CRVUSD: Curve crvUSD / LlamaLend loans in scope (overview and wallet views); absent until the read model fills it */
+  curve?: CurvePositionInfo[];
+}
+
+// ---------- FRONTEND: small optional additions the UI needs ----------
+
+export interface CurvePositionInfo {
+  /** FRONTEND: the address (lowercase) and its label, for links from overview cards */
+  address?: string;
+  label?: string | null;
+}
+
+export interface TxRow {
+  /** set when a transfer of this transaction is one leg of a paired L1 <-> L2 bridge (bridge_pairs) */
+  bridge?: { from: Chain; to: Chain };
+}
+
+/** GET /api/pnl?scope= : the PnL summary of one scope (list rows show the ROI of the selected range). */
+export interface ScopePnlResponse {
+  scope: string;
+  pnl: PnlSummary;
 }

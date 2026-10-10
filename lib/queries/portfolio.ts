@@ -14,10 +14,15 @@ import type {
   WalletSummary,
   WalletWithAddresses,
 } from './api-types';
-import { type QDb, nowSec } from './db';
+import { type QDb, get, nowSec } from './db';
+import { curvePositionInfos } from '../protocols/curve-crvusd';
+import type { Db } from '../history/types';
+import type { CurvePositionInfo } from './api-types';
 import { backfillProgress, emptyBackfill, jobsSummary } from './jobs';
 import { getFlowSummary } from './flows';
+import { loadFx } from './fx';
 import { loadScopeHistory, pnlSummary } from './pnl';
+import { loadScopeYield, windowYield } from './yield';
 import { type ReserveStates, loadReserveStates, positionRisks, riskSummary, withPositionRisk } from './risk';
 import {
   CANONICAL_LABELS,
@@ -237,7 +242,8 @@ export function topTokensOf(st: CurrentState, limit = 20, reserves?: ReserveStat
 export function aaveSummaryOf(st: CurrentState, addresses: Map<number, AddressRow>): AaveSummary {
   const m = new Map<string, { addressId: number; market: string; chain: Chain; suppliedUsd: number; borrowedUsd: number }>();
   for (const b of st.balances) {
-    if (b.side === 'wallet') continue;
+    // FRONTEND: Curve crvUSD / LlamaLend rows are reported in `curve`, not as Aave markets
+    if (b.side === 'wallet' || b.protocol !== 'aave-v3') continue;
     const t = tokenMeta(st.tokens, b.chain, b.token);
     const market = t?.market ?? `${b.chain}-unknown`;
     const k = `${b.addressId}|${market}`;
@@ -326,6 +332,19 @@ export function addressSummaries(db: QDb, rows: AddressRow[], now: number, st?: 
 
 // ---------- views ----------
 
+/** FRONTEND: Curve loans of the current slices; [] when the Curve tables do not exist (tests, old DBs). */
+function curveOf(db: QDb, slices: SliceRef[], addresses?: Map<number, AddressRow>): CurvePositionInfo[] {
+  if (!get(db, "SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'curve_positions'")) return [];
+  try {
+    return curvePositionInfos(db as unknown as Db, slices).map((c) => {
+      const a = addresses?.get(c.addressId);
+      return a ? { ...c, address: a.address, label: a.label } : c;
+    });
+  } catch {
+    return [];
+  }
+}
+
 function portfolioView(db: QDb, ids: number[], now: number, wallets: WalletSummary[]): OverviewResponse {
   const st = currentState(db, ids, now);
   const addresses = new Map(listAddresses(db).map((a) => [a.id, a]));
@@ -333,13 +352,17 @@ function portfolioView(db: QDb, ids: number[], now: number, wallets: WalletSumma
   const totals = totalsOf(st);
   // one history load per request feeds every PnL window and the all-time high
   const history = loadScopeHistory(db, ids, st.tokens);
+  const scopeYield = loadScopeYield(db, ids, history, st.tokens);
   const risks = positionRisks(db, st.balances, st.aave, st.tokens);
   const aave = aaveSummaryOf(st, addresses);
   aave.positions = withPositionRisk(aave.positions, risks);
   return {
     totals,
     change: changesFor(db, ids, st.netUsd, now),
-    pnl: pnlSummary(history, now),
+    pnl: pnlSummary(history, now, {
+      yieldIn: (from, to) => (scopeYield.pieces.length || scopeYield.gasKnown ? windowYield(scopeYield, from, to) : null),
+      fx: loadFx(db),
+    }),
     risk: riskSummary({
       totals,
       balances: st.balances,
@@ -355,6 +378,7 @@ function portfolioView(db: QDb, ids: number[], now: number, wallets: WalletSumma
     byWallet: wallets,
     topTokens: topTokensOf(st, 20, loadReserveStates(db, borrowMarkets(st))),
     aave,
+    curve: curveOf(db, st.slices, addresses),
     lastSnapshotAt: lastSnapshotAt(st.slices),
     jobs: jobsSummary(db, ids),
   };
@@ -432,7 +456,7 @@ export function getAddressDetail(db: QDb, address: string, now = nowSec()): Addr
     let p = protocols.get(market);
     if (!p) {
       p = {
-        protocol: 'aave-v3',
+        protocol: b.protocol === 'curve-crvusd' || b.protocol === 'llamalend' ? b.protocol : 'aave-v3',
         market,
         chain: b.chain,
         supplied: [],
@@ -483,6 +507,7 @@ export function getAddressDetail(db: QDb, address: string, now = nowSec()): Addr
     wallet: { usd: walletUsd, tokens: walletTokens },
     protocols: protoList,
     hidden: { count: hidden.length, tokens: hidden },
+    curve: curveOf(db, st.slices),
     backfill: summary.backfill,
     lastSnapshotAt: lastSnapshotAt(st.slices),
   };

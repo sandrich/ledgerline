@@ -4,7 +4,7 @@
 //   failed in one live snapshot, does not dip to zero). Before a slice's first point it is 0.
 // - A daily point is dropped for a slice when that slice has an intraday point within the same UTC day,
 //   so a day is never represented twice. Daily points are plotted at their day start (ts).
-// - Output is downsampled to at most MAX_POINTS by time buckets (last point of each bucket).
+// - Output is downsampled to at most MAX_POINTS by time buckets (last, highest and lowest point of each bucket).
 // - groupBy=wallet attributes an address shared by several wallets to ONE owner so the stacked layers
 //   always sum to the total: the lowest wallet id among the wallets in scope (the wallet created
 //   first; wallet_addresses rowids are not used because VACUUM may renumber them). Each key carries
@@ -13,11 +13,14 @@
 // - Every point carries assetsUsd (gross: wallet + supplied) and debtUsd (borrowed, positive). Debt
 //   comes from the slice's borrow balances and is carried forward per slice exactly like total, so
 //   total = assetsUsd - debtUsd holds on every point (position_values is net of debt).
+// - getHistory adds unleveredUsd to every point: the unleveraged comparison line computed on the full
+//   merged event timeline of lib/queries/pnl.ts (unleveredSampler), sampled at each emitted point.
 import type { Chain, GroupBy, HistoryPoint, HistoryRange, HistoryResponse, Scope } from './api-types';
 import { all, get, jsonIds, nowSec, type QDb } from './db';
 import { CHAIN_LABELS, DAY, MAX_POINTS, PROTOCOL_LABELS, RANGE_SECONDS, WALLET_COLORS, isChain } from './meta';
 import { listWallets, resolveScope, scopeToString, walletLinks } from './scope';
-import { CHAIN_ENABLED_SQL, type SnapshotKind, sliceBalances, sliceKey, slicesAt, sliceValues } from './state';
+import { loadScopeHistory, unleveredSampler } from './pnl';
+import { CHAIN_ENABLED_SQL, type SnapshotKind, loadTokens, sliceBalances, sliceKey, slicesAt, sliceValues } from './state';
 
 export interface SeriesOptions {
   addressIds: number[];
@@ -98,6 +101,35 @@ export function downsample(ts: number[], maxPoints: number): Set<number> {
   if (out.size > maxPoints) {
     const sorted = [...out].sort((a, b) => a - b);
     out.delete(sorted[1]);
+  }
+  return out;
+}
+
+/**
+ * Like downsample, but keeps each bucket's highest and lowest value besides its last point, so short
+ * spikes (an all-time high, a dip) survive thinning. Uses a third of the buckets to stay within maxPoints.
+ */
+export function downsampleExtremes(ts: number[], values: number[], maxPoints: number): Set<number> {
+  if (ts.length <= maxPoints) return new Set(ts);
+  const buckets = Math.max(2, Math.floor(maxPoints / 3));
+  const first = ts[0];
+  const width = (ts[ts.length - 1] - first) / buckets || 1;
+  const pick = new Map<number, { last: number; hi: number; lo: number }>();
+  for (let k = 0; k < ts.length; k++) {
+    const b = Math.min(buckets - 1, Math.floor((ts[k] - first) / width));
+    const cur = pick.get(b);
+    if (!cur) pick.set(b, { last: k, hi: k, lo: k });
+    else {
+      cur.last = k;
+      if (values[k] > values[cur.hi]) cur.hi = k;
+      if (values[k] < values[cur.lo]) cur.lo = k;
+    }
+  }
+  const out = new Set<number>([first, ts[ts.length - 1]]);
+  for (const p of pick.values()) {
+    out.add(ts[p.last]);
+    out.add(ts[p.hi]);
+    out.add(ts[p.lo]);
   }
   return out;
 }
@@ -187,15 +219,12 @@ export function buildSeries(db: QDb, o: SeriesOptions): HistoryPoint[] {
   if (state.size) timeline.push(o.from);
   for (let j = 0; j < kept.length; j++) if (timeline[timeline.length - 1] !== kept[j].t) timeline.push(kept[j].t);
   if (!timeline.length) return [];
-  const emit = downsample(timeline, maxPoints);
-
   const points: HistoryPoint[] = [];
   for (const t of timeline) {
     while (i < kept.length && kept[i].t === t) {
       state.set(kept[i].slice, kept[i]);
       i++;
     }
-    if (!emit.has(t)) continue;
     const series: Record<string, number> = {};
     let total = 0;
     let debtUsd = 0;
@@ -210,7 +239,13 @@ export function buildSeries(db: QDb, o: SeriesOptions): HistoryPoint[] {
     if (isPartial) p.partial = true;
     points.push(p);
   }
-  return points;
+  if (points.length <= maxPoints) return points;
+  const emit = downsampleExtremes(
+    points.map((p) => p.t),
+    points.map((p) => p.total),
+    maxPoints,
+  );
+  return points.filter((p) => emit.has(p.t));
 }
 
 export function rangeBounds(db: QDb, range: HistoryRange, addressIds: number[], now: number): { from: number; to: number } {
@@ -257,6 +292,10 @@ export function getHistory(
   }
 
   const points = buildSeries(db, { addressIds: ids, from, to, groupKey });
+  if (points.length) {
+    const unlevered = unleveredSampler(loadScopeHistory(db, ids, loadTokens(db)), points[0].t);
+    for (const p of points) p.unleveredUsd = unlevered(p.t) ?? p.total;
+  }
   // keep only keys that actually appear (chain / protocol), preserving order
   if (groupBy === 'chain' || groupBy === 'protocol') {
     const seen = new Set(points.flatMap((p) => Object.keys(p.series)));

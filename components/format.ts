@@ -1,7 +1,19 @@
-// Display formatting: Swiss apostrophe thousands, $ / CHF, dd.mm.yyyy dates,
+// Display formatting: Swiss apostrophe thousands, $ / € / CHF, dd.mm.yyyy dates,
 // subscript zeros for tiny amounts, short addresses. Empty values render as '-'.
+import type { DisplayCurrency } from '../lib/queries/api-types';
 
-export type Currency = 'USD' | 'CHF';
+export type Currency = DisplayCurrency;
+export const CURRENCIES: Currency[] = ['USD', 'EUR', 'CHF'];
+
+/** Symbol rules in one place: $1'234, €1'234, CHF 1'234.- (the ".-" only on whole CHF amounts). */
+export const CUR_PREFIX: Record<Currency, string> = { USD: '$', EUR: '€', CHF: 'CHF ' };
+/** short symbol for small type next to big numbers */
+export const CUR_SYMBOL: Record<Currency, string> = { USD: '$', EUR: '€', CHF: 'CHF' };
+
+/** usd converted to the display currency with `rate` (units of the currency per USD) */
+export function convert(usd: number, cur: Currency, rate: number | null): number {
+  return cur !== 'USD' && rate ? usd * rate : usd;
+}
 
 // ---------- stealth mode ----------
 // When on, every money amount and token amount renders as MASK. Percentages, prices, rates and
@@ -32,7 +44,10 @@ export function fmtNumber(n: number | null | undefined, decimals = 0): string {
   return groupSwiss(n.toFixed(decimals));
 }
 
-/** Money in the selected currency. `usd` is converted with `rate` (USD->CHF) when CHF. */
+/**
+ * Money in the selected currency. `usd` is converted with `rate` (units of the currency per USD)
+ * unless the currency is USD. Pass rate 1 for values that are already in the display currency.
+ */
 export function fmtMoney(
   usd: number | null | undefined,
   cur: Currency,
@@ -41,10 +56,10 @@ export function fmtMoney(
 ): string {
   if (usd == null || !Number.isFinite(usd)) return '-';
   if (stealthOn) return MASK;
-  const v = cur === 'CHF' && rate ? usd * rate : usd;
+  const v = convert(usd, cur, rate);
   const abs = Math.abs(v);
   const sign = v < 0 ? '-' : opts.sign && v > 0 ? '+' : '';
-  if (abs > 0 && abs < 0.01) return `${sign}<${cur === 'CHF' ? 'CHF ' : '$'}0.01`;
+  if (abs > 0 && abs < 0.01) return `${sign}<${CUR_PREFIX[cur]}0.01`;
   let decimals = opts.decimals ?? (abs >= 1000 ? 0 : 2);
   let body: string;
   if (opts.compact && abs >= 1_000_000) {
@@ -55,16 +70,16 @@ export function fmtMoney(
     decimals = 1;
   } else body = groupSwiss(abs.toFixed(decimals));
   if (cur === 'CHF') return `${sign}CHF ${body}${decimals === 0 && !opts.compact ? '.-' : ''}`;
-  return `${sign}$${body}`;
+  return `${sign}${CUR_PREFIX[cur]}${body}`;
 }
 
 /** Currency prefix / suffix for big KPI numbers rendered in parts. */
 export function moneyParts(usd: number, cur: Currency, rate: number | null): { prefix: string; body: string; suffix: string } {
-  if (stealthOn) return { prefix: cur === 'CHF' ? 'CHF ' : '$', body: MASK, suffix: '' };
-  const v = cur === 'CHF' && rate ? usd * rate : usd;
+  if (stealthOn) return { prefix: CUR_PREFIX[cur], body: MASK, suffix: '' };
+  const v = convert(usd, cur, rate);
   const neg = v < 0 ? '-' : '';
   const body = groupSwiss(Math.abs(v).toFixed(0));
-  return cur === 'CHF' ? { prefix: `${neg}CHF `, body, suffix: '.-' } : { prefix: `${neg}$`, body, suffix: '' };
+  return { prefix: `${neg}${CUR_PREFIX[cur]}`, body, suffix: cur === 'CHF' ? '.-' : '' };
 }
 
 /**
@@ -95,8 +110,8 @@ function amountText(n: number): string {
 /** Price per unit: like money but keeps significant digits for sub-cent prices. */
 export function fmtPrice(usd: number | null | undefined, cur: Currency, rate: number | null, decimals = 2): string {
   if (usd == null || !Number.isFinite(usd)) return '-';
-  const v = cur === 'CHF' && rate ? usd * rate : usd;
-  const pre = cur === 'CHF' ? 'CHF ' : '$';
+  const v = convert(usd, cur, rate);
+  const pre = CUR_PREFIX[cur];
   if (Math.abs(v) >= 1) return pre + groupSwiss(v.toFixed(Math.abs(v) >= 1000 ? Math.min(decimals, 2) : 2));
   return pre + amountText(v);
 }
@@ -167,7 +182,13 @@ export function fmtHf(hf: number | null | undefined, hasDebt = true): string {
 
 export const CHAIN_LABEL: Record<string, string> = { ethereum: 'Ethereum', arbitrum: 'Arbitrum' };
 export const CHAIN_COLOR: Record<string, string> = { ethereum: 'var(--oc)', arbitrum: 'var(--ccr)' };
-export const PROTOCOL_LABEL: Record<string, string> = { wallet: 'Wallet', 'aave-v3': 'Aave V3' };
+export const PROTOCOL_LABEL: Record<string, string> = { wallet: 'Wallet', 'aave-v3': 'Aave V3', 'curve-crvusd': 'Curve crvUSD', llamalend: 'LlamaLend' };
+
+/** Curve market key (eth-crvusd-3-weth, arb-llamalend-0-weth) -> "Curve crvUSD WETH" */
+export function curveMarketLabel(market: string, protocol: string, collateralSymbol?: string): string {
+  const sym = collateralSymbol ?? market.split('-').slice(3).join('-').toUpperCase();
+  return `${PROTOCOL_LABEL[protocol] ?? protocol} ${sym}`.trim();
+}
 export const MARKET_LABEL: Record<string, string> = {
   'eth-core': 'Aave V3 Core',
   'eth-prime': 'Aave V3 Prime',

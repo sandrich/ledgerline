@@ -2,7 +2,7 @@
 // Works on the minimal QDb interface (better-sqlite3 at runtime, node:sqlite in tests).
 import type { Chain, TxKind, TxRow } from '../queries/api-types';
 import { all, get, jsonIds, type QDb } from '../queries/db';
-import { classifyTx, type ClassifyContext, type LegHint, type LegInput, type OwnInfo } from './classify';
+import { classifyTx, type ClassifyContext, type CurveRole, type LegHint, type LegInput, type OwnInfo } from './classify';
 
 const EXPLORER: Record<Chain, string> = {
   ethereum: 'https://etherscan.io/tx/',
@@ -10,7 +10,11 @@ const EXPLORER: Record<Chain, string> = {
 };
 
 export function ledgerTablesExist(db: QDb): boolean {
-  return !!get<{ n: string }>(db, "SELECT name AS n FROM sqlite_master WHERE type = 'table' AND name = 'tx_addresses'");
+  return tableExists(db, 'tx_addresses');
+}
+
+function tableExists(db: QDb, name: string): boolean {
+  return !!get<{ n: string }>(db, "SELECT name AS n FROM sqlite_master WHERE type = 'table' AND name = ?", name);
 }
 
 export interface LedgerScope {
@@ -18,6 +22,8 @@ export interface LedgerScope {
   scope: Set<string>;
   own: Map<string, OwnInfo>;
   aTokens: Record<Chain, Set<string>>;
+  /** Curve crvUSD / LlamaLend controllers, AMMs and vaults per chain (empty before migration 6) */
+  curve: Record<Chain, Map<string, CurveRole>>;
 }
 
 /** Scope addresses, every tracked address with its display label, Aave aToken contracts per chain. */
@@ -41,7 +47,21 @@ export function loadScope(db: QDb, addressIds: number[]): LedgerScope {
   for (const t of all<{ chain: string; address: string }>(db, "SELECT chain, address FROM tokens WHERE kind = 'atoken'")) {
     if (t.chain === 'ethereum' || t.chain === 'arbitrum') aTokens[t.chain].add(t.address.toLowerCase());
   }
-  return { addressIds, scope, own, aTokens };
+  const curve: Record<Chain, Map<string, CurveRole>> = { ethereum: new Map(), arbitrum: new Map() };
+  if (tableExists(db, 'curve_markets')) {
+    for (const m of all<{ chain: string; controller: string; amm: string; vault: string | null; borrowed: string }>(
+      db,
+      'SELECT chain, controller, amm, vault, borrowed FROM curve_markets',
+    )) {
+      if (m.chain !== 'ethereum' && m.chain !== 'arbitrum') continue;
+      const borrowed = m.borrowed.toLowerCase();
+      const c = curve[m.chain];
+      c.set(m.controller.toLowerCase(), { role: 'controller', borrowed });
+      c.set(m.amm.toLowerCase(), { role: 'amm', borrowed });
+      if (m.vault) c.set(m.vault.toLowerCase(), { role: 'vault', borrowed });
+    }
+  }
+  return { addressIds, scope, own, aTokens, curve };
 }
 
 export interface RawTx {
@@ -84,8 +104,22 @@ export function buildRows(db: QDb, s: LedgerScope, txs: RawTx[]): TxRow[] {
   const legs = new Map<string, LegInput[]>();
   const meta = new Map<string, TxMeta>();
   const involved = new Map<string, number[]>();
+  const codes = new Map<Chain, Map<string, boolean>>();
+  // FRONTEND: direction of paired bridge legs per tx, for the "Bridge Ethereum -> Arbitrum" label
+  const bridges = new Map<string, { from: Chain; to: Chain }>();
+  const hasCodes = tableExists(db, 'address_code');
+  const hasPairs = tableExists(db, 'bridge_pairs');
   for (const [chain, hashes] of byChain) {
     const hj = JSON.stringify(hashes);
+    // paired bridge legs: the bridge contract side becomes the tracked address on the other chain
+    const peers = new Map<string, { own: string; peer: string }>();
+    if (hasPairs) {
+      const sql =
+        chain === 'ethereum'
+          ? 'SELECT l1_hash AS hash, l1_ref AS ref, l1_addr AS own, l2_addr AS peer FROM bridge_pairs WHERE l1_hash IN (SELECT value FROM json_each(?))'
+          : 'SELECT l2_hash AS hash, l2_ref AS ref, l2_addr AS own, l1_addr AS peer FROM bridge_pairs WHERE l2_hash IN (SELECT value FROM json_each(?))';
+      for (const p of all<{ hash: string; ref: string; own: string; peer: string }>(db, sql, hj)) peers.set(`${p.hash}:${p.ref}`, p);
+    }
     for (const r of all<LegRow>(
       db,
       `SELECT tt.hash, tt.ref, tt.token, tt.from_addr, tt.to_addr, tt.amount_raw, tt.amount, tt.usd, tt.kind_hint,
@@ -97,11 +131,22 @@ export function buildRows(db: QDb, s: LedgerScope, txs: RawTx[]): TxRow[] {
     )) {
       const k = `${chain}:${r.hash}`;
       if (!legs.has(k)) legs.set(k, []);
+      let from = r.from_addr;
+      let to = r.to_addr;
+      const pair = peers.get(`${r.hash}:${r.ref}`);
+      if (pair) {
+        const outbound = from === pair.own;
+        if (outbound) to = pair.peer;
+        else from = pair.peer;
+        // L1 side: own address sends = deposit to L2; L2 side: own address sends = withdrawal to L1
+        const deposit = chain === 'ethereum' ? outbound : !outbound;
+        bridges.set(k, deposit ? { from: 'ethereum', to: 'arbitrum' } : { from: 'arbitrum', to: 'ethereum' });
+      }
       legs.get(k)!.push({
         ref: r.ref,
         token: r.token,
-        from: r.from_addr,
-        to: r.to_addr,
+        from,
+        to,
         amountRaw: r.amount_raw,
         amount: r.amount,
         usd: r.usd,
@@ -112,6 +157,20 @@ export function buildRows(db: QDb, s: LedgerScope, txs: RawTx[]): TxRow[] {
         logo: r.logo,
         priceKey: r.price_key,
       });
+    }
+    if (hasCodes) {
+      const addrs = new Set<string>();
+      for (const h of hashes) for (const l of legs.get(`${chain}:${h}`) ?? []) addrs.add(s.scope.has(l.from) ? l.to : l.from);
+      const m = new Map<string, boolean>();
+      for (const c of all<{ address: string; is_contract: number }>(
+        db,
+        'SELECT address, is_contract FROM address_code WHERE chain = ? AND address IN (SELECT value FROM json_each(?))',
+        chain,
+        JSON.stringify([...addrs]),
+      )) {
+        m.set(c.address, !!c.is_contract);
+      }
+      codes.set(chain, m);
     }
     for (const m of all<TxMeta>(db, 'SELECT hash, block, from_addr, fee_usd FROM tx WHERE chain = ? AND hash IN (SELECT value FROM json_each(?))', chain, hj)) {
       meta.set(`${chain}:${m.hash}`, m);
@@ -131,9 +190,9 @@ export function buildRows(db: QDb, s: LedgerScope, txs: RawTx[]): TxRow[] {
   }
   return txs.map((t) => {
     const k = `${t.chain}:${t.hash}`;
-    const ctx: ClassifyContext = { chain: t.chain, scope: s.scope, own: s.own, aTokens: s.aTokens[t.chain] };
-    const c = classifyTx(legs.get(k) ?? [], ctx);
+    const ctx: ClassifyContext = { chain: t.chain, scope: s.scope, own: s.own, aTokens: s.aTokens[t.chain], codes: codes.get(t.chain), curve: s.curve[t.chain] };
     const m = meta.get(k);
+    const c = classifyTx(legs.get(k) ?? [], ctx, m?.from_addr ?? null);
     return {
       id: k,
       chain: t.chain,
@@ -148,6 +207,7 @@ export function buildRows(db: QDb, s: LedgerScope, txs: RawTx[]): TxRow[] {
       netUsd: c.netUsd,
       feeUsd: m?.from_addr && s.scope.has(m.from_addr) ? m.fee_usd ?? null : null,
       explorerUrl: `${EXPLORER[t.chain]}${t.hash}`,
+      ...(bridges.has(k) ? { bridge: bridges.get(k) } : {}),
     };
   });
 }
@@ -176,5 +236,19 @@ export function scopeTxPage(db: QDb, addressIds: number[], opts: { chain?: Chain
   );
 }
 
-/** Kinds that never count as deposits / withdrawals. */
-export const NON_FLOW_KINDS: ReadonlySet<TxKind> = new Set<TxKind>(['internal', 'aave-supply', 'aave-withdraw', 'aave-borrow', 'aave-repay', 'swap', 'spam', 'approval']);
+/** Kinds that never count as deposits / withdrawals ('other' is a protocol interaction or nets to zero). */
+export const NON_FLOW_KINDS: ReadonlySet<TxKind> = new Set<TxKind>([
+  'internal',
+  'aave-supply',
+  'aave-withdraw',
+  'aave-borrow',
+  'aave-repay',
+  'curve-borrow',
+  'curve-repay',
+  'curve-deposit',
+  'curve-withdraw',
+  'swap',
+  'spam',
+  'approval',
+  'other',
+]);

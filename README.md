@@ -28,7 +28,13 @@ leaves your server.
 
 ![ledgerline overview with synthetic demo data](docs/images/overview.png)
 
-![ledgerline activity ledger with synthetic demo data](docs/images/activity.png)
+| Address detail (Aave and Curve crvUSD) | PnL, risk, yield and costs |
+|---|---|
+| ![Address page with an Aave v3 position and a Curve crvUSD loan](docs/images/address.png) | ![PnL breakdown, risk card and the yield and costs card](docs/images/risk-yield.png) |
+
+| Activity ledger | Stealth mode | Phone |
+|---|---|---|
+| ![Activity ledger with Aave, Curve and bridge transactions](docs/images/activity.png) | ![Overview with every amount masked](docs/images/stealth.png) | ![Overview at phone width](docs/images/mobile.png) |
 
 <sub>Rendered from the synthetic demo database (`npm run demo:data`), not a real portfolio.</sub>
 
@@ -57,19 +63,31 @@ leaves your server.
 - **Ethereum and Arbitrum.** Native ETH, ERC-20 tokens and Safe smart accounts on both chains.
 - **Aave v3, all markets.** Supplied and borrowed assets in every Aave v3 market on these chains:
   Ethereum Core, Prime, EtherFi and Horizon, and Arbitrum.
+- **Curve crvUSD and LlamaLend loans.** Collateral, debt, soft liquidation and Curve health for crvUSD
+  mint markets and LlamaLend borrow positions on both chains, in live snapshots and in the history.
+- **Smart wallet discovery.** Safes and DeFi Saver proxies (DSProxy) owned by your tracked addresses are
+  found automatically and offered as one-click suggestions.
 - **Live snapshots** every N minutes (configurable), with automatic token discovery.
 - **Full history.** Daily values backfilled from each address's first on-chain activity, plus hourly
   points for the last 7 days. Gaps are repaired automatically.
 - **Honest PnL and ROI.** Profit and loss is computed from what you held and how prices moved, so
   deposits, withdrawals and transfers between your own addresses never show up as gains or losses.
+- **Leverage, compared.** The net worth chart draws a "without leverage" line: the same deposits and
+  withdrawals, but only the price return of your gross assets. The gap is what leverage gained or cost.
+- **Rates, interest and gas.** Daily Aave supply / borrow rate history per held asset, interest
+  earned and paid (measured from your balances and transactions), and the gas your addresses paid,
+  per day or week and as part of the PnL breakdown.
 - **Risk and exposure.** Health factor, liquidation price per collateral asset, LTV used, net APY,
   leverage, net exposure per asset (ETH, BTC, USD, ...), stablecoin share and drawdown from the
   all-time high.
 - **Activity ledger.** A transaction list that recognises your own wallets: internal transfers, Aave
-  supply / withdraw / borrow / repay, swaps, approvals and spam are labelled as such.
+  supply / withdraw / borrow / repay, Curve loan actions, swaps, approvals and spam are labelled as
+  such. Arbitrum bridge transfers between your own addresses are paired across chains, and only value
+  from or to externally owned accounts counts as a deposit or withdrawal.
 - **Stealth mode.** Press `h` (or the eye icon) to mask every amount while percentages stay visible.
   Handy for screenshots and screen sharing.
-- **USD or CHF** display, converted with daily FX rates. EUR is on the roadmap.
+- **USD, EUR or CHF** display, converted with daily FX rates, with the currency effect split out: how
+  much of a EUR / CHF change comes from the dollar moving against your currency rather than from prices.
 - **Self-hosted, no telemetry.** No accounts, no analytics, no calls home. The only outbound requests
   go to the data sources listed below.
 
@@ -93,7 +111,7 @@ flowchart LR
   worker -->|"live + archive state, logs,<br/>native transfers"| alchemy["Alchemy RPC<br/>(free tier)"]
   worker -.->|"fallback"| public["Public RPCs<br/>publicnode, drpc, mevblocker,<br/>Tenderly gateway, ..."]
   worker -->|"current + daily prices,<br/>block by timestamp"| llama["DefiLlama"]
-  worker -->|"daily USD/CHF"| fx["Frankfurter"]
+  worker -->|"daily USD/EUR, USD/CHF"| fx["Frankfurter"]
   worker -->|"token discovery"| blockscout["Blockscout (Ethereum)"]
   worker -->|"Safe balances"| safe["Safe transaction service"]
 ```
@@ -434,15 +452,21 @@ The app is then reachable at `https://ledgerline.<your-tailnet>.ts.net`.
 - **ROI** is PnL divided by the capital at work in the window: the starting value plus the peak of
   cumulative net deposits during the window. With no deposits it is simply PnL divided by the starting
   value.
-- **Other** is everything in the value change that is not price PnL: deposits and withdrawals, Aave
-  interest earned and paid, and gas fees (`Other = change in net worth - PnL`).
-- **Currency.** All values are stored in USD. CHF figures use the daily USD/CHF rate of the day each
-  point belongs to, so historical charts are not distorted by today's rate.
+- **Interest and gas** are reported on their own: Aave interest earned minus paid (balance change
+  minus the principal you moved, cross-checked with the daily reserve indices) and the gas paid by
+  your addresses.
+- **Other** is the rest of the value change: deposits and withdrawals
+  (`Other = change in net worth - PnL - interest + gas`).
+- **Without leverage** replays the same deposits and withdrawals with only the price return of your
+  gross assets. Without debt it equals net worth; with leverage the gap is the leverage effect.
+- **Currency.** All values are stored in USD. EUR and CHF figures use the daily rate of the day each
+  point belongs to, so historical charts are not distorted by today's rate. In EUR / CHF the PnL card
+  adds a currency effect column: net worth held times the change of the rate (USD gaining is positive).
 
 ## Limitations
 
 - **Chains:** Ethereum and Arbitrum only.
-- **Protocols:** Aave v3 is the only protocol for now. Tokens held in other protocols appear only if
+- **Protocols:** Aave v3 and Curve crvUSD / LlamaLend loans. Tokens held in other protocols appear only if
   they sit in your wallet as a token (for example LP or vault tokens with a known price).
 - **Native ETH on Arbitrum:** ETH paid out to you by a contract (an internal call) is not visible in
   the activity ledger, because Alchemy does not support internal transfers on Arbitrum. Balances and
@@ -453,10 +477,8 @@ The app is then reachable at `https://ledgerline.<your-tailnet>.ts.net`.
 
 ## Roadmap
 
-- EUR as a display currency
-- Split "Other" into interest earned, interest paid and gas
-- Currency effect (how much of a CHF/EUR change comes from FX)
 - More chains (Base, Optimism, ...) and protocols
+- LlamaLend lending deposits (vault shares) and Curve interest in the yield card
 
 Ideas and pull requests are welcome, see below.
 

@@ -1,6 +1,7 @@
 'use client';
-// App-wide client state: currency (USD default, CHF persisted in localStorage), USD->CHF rates,
-// toasts and a "data changed" tick that pages use to refetch after a sync.
+// App-wide client state: display currency (USD default, EUR / CHF persisted in localStorage), the
+// daily rates of the selected currency per USD, toasts and a "data changed" tick that pages use to
+// refetch after a sync.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { FxResponse } from '../../lib/queries/api-types';
 import { setStealthFlag, type Currency } from '../format';
@@ -8,10 +9,14 @@ import { setStealthFlag, type Currency } from '../format';
 interface AppState {
   currency: Currency;
   setCurrency: (c: Currency) => void;
-  /** latest USD->CHF */
+  /** latest rate of the selected currency (units per USD); 1 for USD */
   rate: number | null;
-  /** USD->CHF for a unix-seconds timestamp (that day's rate, forward filled), falls back to latest */
+  /** rate of the selected currency for a unix-seconds timestamp (that day's rate, forward filled), falls back to latest */
   rateAt: (ts: number) => number | null;
+  /** false for a currency without any synced rate yet (it would show USD amounts with a € / CHF sign) */
+  available: (c: Currency) => boolean;
+  /** daily rates (YYYY-MM-DD -> units per USD) of the selected currency, empty for USD */
+  rateSeries: Record<string, number>;
   toast: (msg: string, kind?: 'ok' | 'err') => void;
   refreshTick: number;
   bump: () => void;
@@ -42,8 +47,14 @@ function isTyping(t: EventTarget | null): boolean {
 }
 
 export function Providers({ children }: { children: ReactNode }) {
-  const [currency, setCur] = useState<Currency>('USD');
+  const [chosen, setCur] = useState<Currency>('USD');
   const [fx, setFx] = useState<FxResponse | null>(null);
+  // until /api/fx answers every currency counts as available, so a stored EUR / CHF does not flash USD
+  const available = useCallback(
+    (c: Currency) => c === 'USD' || !fx || fx.latest?.[c] != null || (c === 'CHF' && fx.latest?.usdChf != null) || Object.keys(fx.rates?.[c] ?? {}).length > 0,
+    [fx],
+  );
+  const currency: Currency = available(chosen) ? chosen : 'USD';
   const [toastMsg, setToastMsg] = useState<{ msg: string; kind: 'ok' | 'err' } | null>(null);
   const [refreshTick, setTick] = useState(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -54,7 +65,7 @@ export function Providers({ children }: { children: ReactNode }) {
   useEffect(() => {
     try {
       const v = localStorage.getItem(KEY);
-      if (v === 'CHF' || v === 'USD') setCur(v);
+      if (v === 'CHF' || v === 'USD' || v === 'EUR') setCur(v);
       if (localStorage.getItem(STEALTH_KEY) === '1') setStealthState(true);
     } catch {
       /* storage unavailable */
@@ -105,25 +116,31 @@ export function Providers({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const sortedDays = useMemo(() => (fx ? Object.keys(fx.daily).sort() : []), [fx]);
-  const rate = fx?.latest?.usdChf ?? null;
+  // rates of the selected currency; old servers only send the CHF `daily` map
+  const rateSeries = useMemo<Record<string, number>>(() => {
+    if (!fx || currency === 'USD') return {};
+    return fx.rates?.[currency] ?? (currency === 'CHF' ? fx.daily : {});
+  }, [fx, currency]);
+  const sortedDays = useMemo(() => Object.keys(rateSeries).sort(), [rateSeries]);
+  const rate = currency === 'USD' ? 1 : (fx?.latest?.[currency] ?? (currency === 'CHF' ? fx?.latest?.usdChf : null) ?? (sortedDays.length ? rateSeries[sortedDays[sortedDays.length - 1]] : null));
   const rateAt = useCallback(
     (ts: number) => {
-      if (!fx || !sortedDays.length) return rate;
+      if (currency === 'USD') return 1;
+      if (!sortedDays.length) return rate;
       const day = new Date(ts * 1000).toISOString().slice(0, 10);
-      if (fx.daily[day] != null) return fx.daily[day];
+      if (rateSeries[day] != null) return rateSeries[day];
       // binary search the last day <= day
       let lo = 0;
       let hi = sortedDays.length - 1;
-      if (day < sortedDays[0]) return fx.daily[sortedDays[0]];
+      if (day < sortedDays[0]) return rateSeries[sortedDays[0]];
       while (lo < hi) {
         const mid = Math.ceil((lo + hi) / 2);
         if (sortedDays[mid] <= day) lo = mid;
         else hi = mid - 1;
       }
-      return fx.daily[sortedDays[lo]] ?? rate;
+      return rateSeries[sortedDays[lo]] ?? rate;
     },
-    [fx, sortedDays, rate],
+    [currency, rateSeries, sortedDays, rate],
   );
 
   const toast = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
@@ -134,8 +151,8 @@ export function Providers({ children }: { children: ReactNode }) {
   const bump = useCallback(() => setTick((t) => t + 1), []);
 
   const value = useMemo<AppState>(
-    () => ({ currency, setCurrency, rate, rateAt, toast, refreshTick, bump, stealth, setStealth }),
-    [currency, setCurrency, rate, rateAt, toast, refreshTick, bump, stealth, setStealth],
+    () => ({ currency, setCurrency, rate, rateAt, available, rateSeries, toast, refreshTick, bump, stealth, setStealth }),
+    [currency, setCurrency, rate, rateAt, available, rateSeries, toast, refreshTick, bump, stealth, setStealth],
   );
   return (
     <Ctx.Provider value={value}>

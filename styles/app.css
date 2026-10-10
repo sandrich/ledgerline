@@ -9,6 +9,7 @@ h4 { margin: 0 0 10px; font-size: 14px; font-weight: 500; color: var(--text-2); 
 /* top bar */
 .db-hint.stale { color: var(--warn); }
 .cur-seg { height: 34px; }
+.cur-select { display: none; height: 34px; padding: 0 6px; border-radius: 9px; border: 1px solid var(--line-2); background: var(--surface); color: var(--text); font-family: var(--font-mono); font-size: 12.5px; }
 .cur-seg label { padding: 0 10px; font-family: var(--font-mono); font-size: 12.5px; }
 .spin-icon { animation: rot 0.8s linear infinite; }
 
@@ -508,3 +509,77 @@ fieldset.field legend { padding: 0; margin-bottom: 7px; }
 @media (max-width: 720px) {
   .tx-legs:has(.empty-leg) { display: none; }
 }
+
+/* ---------- F3: unleveraged line, yield, rates, currency, suggestions, curve ---------- */
+.line-legend .ll-effect { margin-left: auto; font-size: 13px; color: var(--text-3); }
+.line-legend .ll-effect::before { display: none; }
+.line-legend .ll-effect b.pos { color: var(--ok); }
+.line-legend .ll-effect b.neg { color: var(--warn); }
+.tooltip .sw-blank { background: none; }
+.tooltip .row .pos { color: var(--ok); }
+.tooltip .row .neg { color: var(--warn); }
+.pnl-parts { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.parts-dl { margin: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; }
+.parts-dl > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.parts-dl dt { font-size: 12.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.parts-dl dd { margin: 0; font-family: var(--font-mono); font-size: 14px; font-variant-numeric: tabular-nums; color: var(--text); }
+.parts-dl dd.dim { color: var(--text-2); }
+.parts-dl dd.muted { color: var(--text-4); }
+.parts-dl .parts-total dt { color: var(--text-2); font-weight: 500; }
+@media (max-width: 520px) { .parts-dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.curve-note { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin: -4px 0 16px; padding: 9px 12px; border-radius: 10px; background: var(--surface-2); font-size: 13.5px; color: var(--text-2); }
+.curve-note b { font-weight: 500; color: var(--text); }
+.curve-note.danger { background: var(--warn-soft); }
+.curve-note.danger .ph { color: var(--warn); }
+
+/* Aave card: APY per asset with a rate sparkline */
+.apy-rows { grid-column: 1 / -1; list-style: none; margin: 2px 0 0; padding: 8px 0 0; border-top: 1px dashed var(--line-2); display: flex; flex-direction: column; gap: 4px; }
+.apy-rows li { display: grid; grid-template-columns: minmax(0, 1fr) 64px 62px; gap: 10px; align-items: center; font-size: 13px; }
+.apy-sym { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.apy-val { text-align: right; font-size: 12.5px; }
+.link-btn { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; }
+.link-btn:hover { color: var(--text); }
+.link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.rates-head-right { display: inline-flex; align-items: center; gap: 10px; }
+
+/* yield & costs */
+.yield-stats { margin-bottom: 14px; }
+.stat-value.muted { color: var(--text-4); }
+.yield-legend { flex-wrap: wrap; }
+.yield-legend .lg-gas::before { opacity: 0.45; }
+.yield-legend .lg-line::before { height: 2px; border-radius: 1px; }
+.yield-legend .lg-bucket { margin-left: auto; color: var(--text-4); }
+.yield-legend .lg-bucket::before { display: none; }
+.yield-bars .cum-tick { fill: var(--accent); }
+.chart-skeleton.small { height: 200px; }
+.yield-assets { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 13.5px; }
+.yield-assets li { display: inline-flex; gap: 8px; align-items: baseline; }
+.yield-assets b { font-weight: 500; }
+.yield-card, .currency-card { display: flex; flex-direction: column; }
+.yield-card .footnote, .currency-card .footnote { margin-top: auto; padding-top: 14px; }
+
+/* currency card */
+.cur-top { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
+.cur-top > div { display: flex; flex-direction: column; gap: 2px; }
+.cur-rate, .cur-fx { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; font-family: var(--font-sans); font-variant-numeric: tabular-nums; }
+.cur-rate small { font-size: 13px; font-weight: 500; font-family: var(--font-mono); }
+
+/* smart wallet suggestion */
+.suggest-banner > .ph { font-size: 20px; color: var(--accent); }
+.banner-actions { display: flex; gap: 8px; flex: none; }
+@media (max-width: 720px) {
+  .yield-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .suggest-banner { flex-wrap: wrap; }
+  .banner-actions { width: 100%; }
+  .cur-rate, .cur-fx { font-size: 19px; }
+}
+.tx-sub-kind { font-size: 11.5px; font-weight: 400; color: var(--text-3); margin-left: 6px; }
+.kpi .sub .sub-line.wrap { white-space: normal; }
+.pnl-scroll { overflow-x: auto; margin: 0 -4px; padding: 0 4px; }
+@media (max-width: 520px) {
+  .topbar-inner { gap: 6px; }
+  .topbar-right .cur-seg { display: none; }
+  .topbar-right .cur-select { display: inline-block; }
+  .pnl-table td.num { font-size: 12.5px; }
+}
+.cur-seg label.off { opacity: 0.4; cursor: not-allowed; }

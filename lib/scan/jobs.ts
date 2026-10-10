@@ -24,7 +24,8 @@ import {
 } from '../db/repos-scan';
 import { runDiscovery } from './discover';
 import { runLiveSnapshot } from './live';
-import type { Logger } from './log';
+import { errMsg, type Logger } from './log';
+import { runSmartWalletDiscovery } from './smart-wallets';
 
 export type JobType = 'snapshot' | 'discovery' | 'sync' | 'backfill' | 'hourly-backfill' | 'price-history' | 'rollup' | 'ledger';
 
@@ -133,7 +134,16 @@ export async function dispatchJob(ctx: JobContext): Promise<unknown> {
       const ids = resolveAddressIds(db, payload);
       if (ids && !ids.length) return { skipped: 'no matching addresses' };
       const r = await runDiscovery({ db, log, signal, addressIds: ids, chains: chainsOf(payload) });
-      return { pairs: r.results.length, backfillJobs: r.backfillJobs };
+      // LEDGER: smart wallets (Safes, DSProxies) owned by tracked EOAs, once per day per EOA
+      let smartWallets: number | string = 0;
+      try {
+        smartWallets = (await runSmartWalletDiscovery({ db, log, signal, addressIds: ids })).newSuggestions;
+      } catch (e) {
+        if (signal.aborted) throw e;
+        smartWallets = errMsg(e);
+        log.warn('smart wallet discovery failed', { error: smartWallets });
+      }
+      return { pairs: r.results.length, backfillJobs: r.backfillJobs, smartWallets };
     }
     case 'sync': {
       const ids = resolveAddressIds(db, payload);

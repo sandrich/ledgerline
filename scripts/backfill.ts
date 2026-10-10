@@ -85,7 +85,8 @@ function seedAddress(db: Db, address: string): number {
 }
 
 function validate(db: Db, addressId: number): void {
-  const fx = (d: string) => (db.prepare('SELECT usd_chf FROM fx WHERE day = ?').get(d) as { usd_chf: number } | undefined)?.usd_chf;
+  const fx = (d: string) =>
+    (db.prepare("SELECT rate_from_usd AS r FROM fx WHERE day = ? AND currency = 'CHF'").get(d) as { r: number } | undefined)?.r;
   const first = db
     .prepare(
       `SELECT MIN(s.ts) AS t FROM snapshots s JOIN position_values pv ON pv.snapshot_id = s.id

@@ -1,6 +1,10 @@
 // External deposits / withdrawals of a scope from the transactions ledger.
-// Sums TxRow.netUsd (value at the time) over the scope's transactions of kind receive / send / other:
-// - transfers between addresses of the scope are internal and never count
+// Sums TxRow.netUsd (value at the time) over the scope's transactions of kind receive / send:
+// - only value exchanged with externally owned counterparties (exchanges, other people), netted per
+//   transaction, and unpaired Arbitrum bridge legs count (lib/ledger/classify.ts)
+// - value moving to / from a contract (protocol, router, DSProxy, Safe, bridge) is a protocol
+//   interaction ('other') and never counts
+// - transfers between addresses of the scope (including paired bridge transfers) are internal
 // - transfers with a tracked address OUTSIDE the scope count (for a wallet scope, money arriving from
 //   another own wallet is a deposit into this wallet; in the overview such transfers are internal)
 // - Aave supply / withdraw / borrow / repay, swaps, approvals and spam count 0

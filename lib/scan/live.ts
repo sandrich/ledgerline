@@ -43,6 +43,7 @@ import {
 import { decodeUint, multicallAt, nativeBalanceCall, type HistCall } from '../history/multicall';
 import { ETH_KEY, canonicalPriceKey } from '../history/price-keys';
 import { throwIfAborted, type Db } from '../history/types';
+import { readCurvePoint, valueCurvePoint, curveProtocolTotals, writeCurvePositions, type CurvePointRead } from '../protocols/curve-crvusd';
 import { errMsg, type Logger } from './log';
 import { HEAD_LAG, headBlock, latestRpc } from './rpc-latest';
 import { nameLooksSpam } from './spam';
@@ -63,6 +64,8 @@ export interface LiveChainResult {
   calls: number;
   walletUsd: number;
   aaveUsd: number;
+  /** net value of Curve crvUSD / LlamaLend positions */
+  curveUsd?: number;
   error?: string;
 }
 
@@ -92,6 +95,8 @@ interface ChainRead {
   accts: Map<string, Omit<ScanAaveAccountRow, 'market'>>; // `${a}|${market}`
   /** reserve rates / risk parameters; empty when those reads failed (risk KPIs then stay null) */
   reserveStates: ScanReserveState[];
+  /** Curve crvUSD / LlamaLend positions of discovered pairs (null: none) */
+  curve: CurvePointRead | null;
 }
 
 /**
@@ -248,7 +253,10 @@ async function readChain(db: Db, chain: ScanChain, addrs: ScanAddress[], log: Lo
     if (signal?.aborted) throw e;
     log.warn(`live ${chain}: Aave rates / risk read failed, risk KPIs stay empty this round`, { error: errMsg(e) });
   }
-  return { chain, block, addrs, slots, raws, accts, reserveStates };
+  // Curve crvUSD / LlamaLend: separate multicall, only for discovered (address, controller) pairs.
+  // A failure fails the chain read (carry forward) like a failed Aave sub-call.
+  const curve = await readCurvePoint(db, chain, rpc, block, addrs.map((x, a) => ({ a, addressId: x.id, address: x.address })), { rates: true, signal });
+  return { chain, block, addrs, slots, raws, accts, reserveStates, curve };
 }
 
 export async function runLiveSnapshot(opts: RunLiveSnapshotOptions): Promise<LiveSnapshotResult> {
@@ -292,6 +300,7 @@ export async function runLiveSnapshot(opts: RunLiveSnapshotOptions): Promise<Liv
       if (s.t === 'wallet') keys.add(walletKey(r.chain, s.token));
       else if (s.t === 'aave') keys.add(s.r.priceKey);
     });
+    for (const k of r.curve?.priceKeys ?? []) keys.add(k);
   }
   const lookup: PriceLookup = await fetchCurrentPrices([...keys], log, signal);
   if (!lookup.prices.size) throw new Error('live snapshot: no current prices (DefiLlama unreachable), not writing a zero snapshot');
@@ -299,6 +308,7 @@ export async function runLiveSnapshot(opts: RunLiveSnapshotOptions): Promise<Liv
 
   // 3. Value and build slices.
   const slices: ScanSlice[] = [];
+  const curveWrites: { chain: ScanChain; ids: number[]; vals: ReturnType<typeof valueCurvePoint> }[] = [];
   const marketsByChain = Object.fromEntries(SCAN_CHAINS.map((c) => [c, marketsForChain(c).map((m) => m.key)])) as Record<ScanChain, string[]>;
   for (const r of reads) {
     const per = r.addrs.map((addr) => ({
@@ -343,6 +353,19 @@ export async function runLiveSnapshot(opts: RunLiveSnapshotOptions): Promise<Liv
         p.slice.balances.push({ token, amountRaw: raw.toString(), amount, usd, protocol: 'aave-v3', side: s.side === 'supply' ? 'supply' : 'borrow' });
       }
     });
+    const curveVals = r.curve ? valueCurvePoint(r.curve, (k) => priceOf(lookup, k) ?? null) : [];
+    let curveUsd = 0;
+    per.forEach((p, a) => {
+      const mine = curveVals.filter((v) => v.a === a).map((v) => v.valued);
+      for (const v of mine) {
+        for (const b of v.rows) p.slice.balances.push({ ...b });
+      }
+      for (const t of curveProtocolTotals(mine)) {
+        p.slice.positions.push(t);
+        curveUsd += t.usd;
+      }
+    });
+    curveWrites.push({ chain: r.chain, ids: r.addrs.map((x) => x.id), vals: curveVals });
     let walletUsd = 0;
     let aaveUsd = 0;
     per.forEach((p, a) => {
@@ -356,14 +379,15 @@ export async function runLiveSnapshot(opts: RunLiveSnapshotOptions): Promise<Liv
       aaveUsd += p.aave;
       slices.push(p.slice);
     });
-    result.chains[r.chain] = { block: r.block, addresses: r.addrs.length, calls: r.slots.length, walletUsd, aaveUsd };
-    result.totalUsd += walletUsd + aaveUsd;
+    result.chains[r.chain] = { block: r.block, addresses: r.addrs.length, calls: r.slots.length, walletUsd, aaveUsd, curveUsd };
+    result.totalUsd += walletUsd + aaveUsd + curveUsd;
   }
 
   // 4. Write.
   throwIfAborted(signal);
   result.snapshotId = scanWriteLiveSlices(db, ts, slices, marketsByChain);
   for (const r of reads) scanWriteReserveStates(db, result.snapshotId, r.chain, r.reserveStates);
+  for (const c of curveWrites) writeCurvePositions(db, result.snapshotId, c.chain, c.ids, c.vals);
   // A chain that could not be read keeps its previous values (otherwise totals would dip to zero).
   for (const chain of chains) {
     if (reads.some((r) => r.chain === chain)) continue;

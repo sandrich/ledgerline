@@ -15,6 +15,8 @@ export interface TransactionsQuery {
   hideInternal?: boolean;
   /** default true */
   hideSpam?: boolean;
+  /** show approvals and zero value contract calls (kind 'other' without value legs); default false */
+  includeApprovals?: boolean;
   cursor?: string | null;
   /** default 50, max 200 */
   limit?: number;
@@ -75,6 +77,7 @@ export function getTransactions(db: QDb, q: TransactionsQuery): TransactionsResp
   const keep = (r: TxRow): boolean => {
     if (kinds) return kinds.has(r.kind) && !(r.kind === 'internal' && q.hideInternal);
     if (r.kind === 'spam' && hideSpam) return false;
+    if (!q.includeApprovals && (r.kind === 'approval' || (r.kind === 'other' && !r.transfers.length))) return false;
     if (r.kind === 'internal' && q.hideInternal) return false;
     return true;
   };

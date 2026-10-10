@@ -3,13 +3,15 @@
 // allocation by chain / protocol, top holdings, Aave positions.
 import Link from 'next/link';
 import { useState, type ReactNode } from 'react';
-import type { FlowSummary, GroupBy, HistoryRange, OverviewResponse, PnlPeriod, WalletDetailResponse } from '../../lib/queries/api-types';
+import type { FlowSummary, GroupBy, HistoryRange, OverviewResponse, PnlPeriod, ScopePnlResponse, WalletDetailResponse } from '../../lib/queries/api-types';
 import { HistoryCard, RANGES, RangePills } from '../charts/HistoryCard';
 import { Sparkline, useScopeHistory } from '../charts/Sparkline';
-import { fmtMoney, fmtPct, fmtShare, fmtUtcDate, shortAddr } from '../format';
+import { fmtMoney, fmtPct, fmtShare, fmtUtcDate, shortAddr, type Currency } from '../format';
 import { useApi, useApp } from '../layout/Providers';
 import { RecentActivity } from '../tx/TxList';
 import { PnlCard, RiskCard } from './PnlRiskCards';
+import { pnlDisplay } from './pnl-display';
+import { CurrencyCard, RatesCard, SuggestionsBanner, YieldCard, useRates, useYield } from './YieldCards';
 import { AaveCard, BackfillBanner, BarList, ErrorCard, Hero, KpiStrip, PageSkeleton, RANGE_TEXT, TopHoldings, chainColor, protocolColor } from './parts';
 
 /** Selected range, shared by the chart, the KPI strip and the PnL card; remembered per scope. */
@@ -59,6 +61,9 @@ function ScopeRow({
 }) {
   const { currency, rate } = useApp();
   const { points, pct } = useScopeHistory(scope, range);
+  // ROI of the range (price PnL over invested capital), not the value change: deposits are not gains
+  const { data: pnl } = useApi<ScopePnlResponse>(`/api/pnl?scope=${encodeURIComponent(scope)}`);
+  const roi = pnl?.pnl[range]?.returnPct ?? null;
   return (
     <Link href={href}>
       <span className="r-date badge" style={{ ['--bc' as string]: color }}>
@@ -73,8 +78,8 @@ function ScopeRow({
       </span>
       <span className="r-depth">
         {fmtMoney(usd, currency, rate, { decimals: 0 })}
-        <small className={pct != null && pct < 0 ? 'neg' : 'pos'} title={`Change ${RANGE_TEXT[range].long}`}>
-          {fmtPct(pct)}
+        <small className={roi == null ? 'muted' : roi < 0 ? 'neg' : 'pos'} title={`PnL return on invested capital ${RANGE_TEXT[range].long} (deposits and withdrawals do not count)`}>
+          {roi != null ? `${fmtPct(roi)} ROI` : '-'}
         </small>
       </span>
     </Link>
@@ -116,11 +121,12 @@ function FlowsBlock({ flows, walletScope, scope }: { flows: FlowSummary; walletS
   );
 }
 
-function heroPnl(p: PnlPeriod | null | undefined, range: HistoryRange, currency: 'USD' | 'CHF', rate: number | null, stealth: boolean): string {
+function heroPnl(p: PnlPeriod | null | undefined, range: HistoryRange, currency: Currency, rate: number | null, stealth: boolean): string {
   if (!p || p.pnlUsd == null) return '';
   if (stealth) return p.returnPct != null ? `${fmtPct(p.returnPct)} ROI ${RANGE_TEXT[range].long}.` : '';
   const roi = p.returnPct != null ? ` (${fmtPct(p.returnPct)} ROI)` : '';
-  return `${fmtMoney(p.pnlUsd, currency, rate, { sign: true, compact: true })} PnL${roi} ${RANGE_TEXT[range].long}.`;
+  const d = pnlDisplay(p, currency, rate);
+  return `${fmtMoney(d?.pnl ?? null, currency, 1, { sign: true, compact: true })} PnL${roi} ${RANGE_TEXT[range].long}.`;
 }
 
 function initials(name: string): string {
@@ -132,7 +138,12 @@ export function PortfolioView({ walletId }: { walletId?: number }) {
   const url = walletId != null ? `/api/wallets/${walletId}` : '/api/overview';
   const { data, error, loading, reload } = useApi<OverviewResponse | WalletDetailResponse>(url, { pollMs: 60_000 });
   const { currency, rate, stealth } = useApp();
-  const [range, setRange] = useScopeRange(walletId != null ? `wallet:${walletId}` : 'all', '30d');
+  const scopeKey = walletId != null ? `wallet:${walletId}` : 'all';
+  const [range, setRange] = useScopeRange(scopeKey, '30d');
+  const yieldSel = useYield(scopeKey, range);
+  const yield30 = useYield(scopeKey, '30d');
+  const { data: rates } = useRates(scopeKey, range);
+  const [ratesOpen, setRatesOpen] = useState(false);
 
   if (loading) return <PageSkeleton />;
   if (error && !data) return <ErrorCard message={error} onRetry={reload} />;
@@ -203,7 +214,17 @@ export function PortfolioView({ walletId }: { walletId?: number }) {
         right={<RangePills value={range} onChange={setRange} />}
       />
       <BackfillBanner addressIds={addresses ? addresses.map((a) => a.id) : null} />
-      <KpiStrip totals={data.totals} aave={data.aave} pnl={data.pnl} risk={data.risk} range={range} flows={data.flows} walletScope={!!wallet} />
+      <SuggestionsBanner walletId={wallet?.id} />
+      <KpiStrip
+        totals={data.totals}
+        aave={data.aave}
+        pnl={data.pnl}
+        risk={data.risk}
+        range={range}
+        flows={data.flows}
+        walletScope={!!wallet}
+        yield30={range === '30d' ? yieldSel.data : yield30.data}
+      />
 
       <div className="bento">
         <HistoryCard scope={scope} range={range} groups={groups} defaultGroup={defaultGroup} />
@@ -260,7 +281,9 @@ export function PortfolioView({ walletId }: { walletId?: number }) {
         </section>
 
         <PnlCard pnl={data.pnl} range={range} onRange={setRange} />
-        <RiskCard risk={data.risk} hasAave={hasAave} netUsd={data.totals.netUsd} />
+        <RiskCard risk={data.risk} hasAave={hasAave} hasDebt={data.aave.borrowedUsd > 0} netUsd={data.totals.netUsd} />
+        <YieldCard data={yieldSel.data} loading={yieldSel.loading} range={range} className={currency === 'USD' ? 'card span-12' : 'card span-8'} />
+        <CurrencyCard pnl={data.pnl} range={range} />
 
         <section className="card span-4">
           <div className="card-head">
@@ -288,7 +311,8 @@ export function PortfolioView({ walletId }: { walletId?: number }) {
           </div>
           <TopHoldings tokens={data.topTokens} totals={data.totals} />
         </section>
-        <AaveCard aave={data.aave} />
+        <AaveCard aave={data.aave} curve={data.curve} rates={rates} ratesOpen={ratesOpen} onToggleRates={() => setRatesOpen((v) => !v)} />
+        {ratesOpen && <RatesCard rates={rates} range={range} onClose={() => setRatesOpen(false)} />}
         <RecentActivity scope={scope} />
       </div>
     </div>

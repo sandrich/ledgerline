@@ -54,8 +54,13 @@ const OWN = new Map<string, OwnInfo>([
   [SAFE, { id: 1, label: 'Vault Safe' }],
   [EOA, { id: 2, label: 'Cold storage' }],
 ]);
+// eth_getCode cache: EXT is an EOA (exchange, other person), ROUTER a contract
+const CODES = new Map<string, boolean>([
+  [EXT, false],
+  [ROUTER, true],
+]);
 function ctx(scope: string[]): ClassifyContext {
-  return { chain: 'arbitrum', scope: new Set(scope), own: OWN, aTokens: new Set([AWETH, AUSDC]) };
+  return { chain: 'arbitrum', scope: new Set(scope), own: OWN, aTokens: new Set([AWETH, AUSDC]), codes: CODES };
 }
 const OVERVIEW = ctx([SAFE, EOA]);
 const SAFE_ONLY = ctx([SAFE]);
@@ -156,8 +161,13 @@ describe('swap, wrap and spam', () => {
     assert.equal(c.netUsd, 0);
     assert.equal(c.counterparty, EXT);
   });
-  test('same asset back and forth is not a swap', () => {
-    assert.equal(classifyTx([leg(USDC, EOA, EXT, 10, 10), leg(USDC, EXT, EOA, 9, 9)], OVERVIEW).kind, 'other');
+  test('same asset back and forth is not a swap: legs are netted per tx', () => {
+    const c = classifyTx([leg(USDC, EOA, EXT, 10, 10), leg(USDC, EXT, EOA, 9, 9)], OVERVIEW);
+    assert.equal(c.kind, 'send');
+    assert.equal(c.netUsd, -1);
+    const zero = classifyTx([leg(USDC, EOA, EXT, 10, 10), leg(USDC, EXT, EOA, 10, 10)], OVERVIEW);
+    assert.equal(zero.kind, 'other');
+    assert.equal(zero.netUsd, 0);
   });
   test('ETH sent by the owner and wrapped by the Safe is internal, not a phantom WETH deposit', () => {
     // Arbitrum: owner EOA -> Safe 2 ETH (external), WETH minted to the Safe (its ETH -> WETH call is an
@@ -197,6 +207,10 @@ CREATE TABLE tx (chain TEXT NOT NULL, hash TEXT NOT NULL, block INTEGER NOT NULL
 CREATE TABLE tx_transfers (chain TEXT NOT NULL, hash TEXT NOT NULL, ref TEXT NOT NULL, token TEXT NOT NULL, from_addr TEXT NOT NULL, to_addr TEXT NOT NULL, amount_raw TEXT, amount REAL, usd REAL, kind_hint TEXT NOT NULL, PRIMARY KEY (chain, hash, ref));
 CREATE TABLE tx_addresses (address_id INTEGER NOT NULL, chain TEXT NOT NULL, hash TEXT NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (address_id, chain, hash));
 CREATE TABLE ledger_state (address_id INTEGER NOT NULL, chain TEXT NOT NULL, last_block INTEGER, native_block INTEGER, updated_at INTEGER, error TEXT, PRIMARY KEY (address_id, chain));
+CREATE TABLE address_code (chain TEXT NOT NULL, address TEXT NOT NULL, is_contract INTEGER NOT NULL, checked_at INTEGER NOT NULL, PRIMARY KEY (chain, address));
+CREATE TABLE bridge_pairs (l1_hash TEXT NOT NULL, l1_ref TEXT NOT NULL, l1_addr TEXT NOT NULL, l2_hash TEXT NOT NULL, l2_ref TEXT NOT NULL,
+  l2_addr TEXT NOT NULL, direction TEXT NOT NULL, PRIMARY KEY (l1_hash, l1_ref));
+CREATE UNIQUE INDEX bridge_pairs_l2 ON bridge_pairs(l2_hash, l2_ref);
 `;
 
 function seedDb(): QDb {
@@ -205,7 +219,8 @@ function seedDb(): QDb {
   d.exec(`INSERT INTO wallets (id, name, sort) VALUES (1, 'Main', 0), (2, 'Cold storage', 1);
     INSERT INTO addresses (id, address, label, chains) VALUES (1, '${SAFE}', 'Vault Safe', '["arbitrum"]'), (2, '${EOA}', NULL, '["arbitrum"]');
     INSERT INTO wallet_addresses VALUES (1, 1), (2, 2);
-    INSERT INTO ledger_state (address_id, chain, last_block) VALUES (1, 'arbitrum', 100), (2, 'arbitrum', 100);`);
+    INSERT INTO ledger_state (address_id, chain, last_block) VALUES (1, 'arbitrum', 100), (2, 'arbitrum', 100);
+    INSERT INTO address_code VALUES ('arbitrum', '${EXT}', 0, 1), ('arbitrum', '${ROUTER}', 1, 1);`);
   for (const [a, t] of Object.entries(TOKENS)) {
     d.prepare('INSERT INTO tokens (chain, address, symbol, kind, price_key, spam, decimals) VALUES (?, ?, ?, ?, ?, ?, 18)').run('arbitrum', a, t.symbol, t.kind, t.priceKey, t.spam ? 1 : 0);
   }
@@ -269,5 +284,38 @@ describe('getTransactions / getFlowSummary', () => {
     }
     assert.equal(seen.length, 6);
     assert.equal(new Set(seen).size, 6);
+  });
+});
+
+describe('curve crvUSD / LlamaLend loan legs', () => {
+  const CTRL = '0x5a5a00000000000000000000000000000000c001';
+  const AMM = '0x5a5a00000000000000000000000000000000a001';
+  const CRVUSD = '0x5a5a00000000000000000000000000000000c0d0';
+  TOKENS[CRVUSD] = { kind: 'erc20', symbol: 'crvUSD', priceKey: 'coingecko:crvusd' };
+  const curve = new Map([
+    [CTRL, { role: 'controller' as const, borrowed: CRVUSD }],
+    [AMM, { role: 'amm' as const, borrowed: CRVUSD }],
+  ]);
+  const c = (scope: string[]): ClassifyContext => ({ ...ctx(scope), curve });
+  test('create loan: collateral to the AMM, crvUSD from the controller is a borrow, never a flow', () => {
+    const r = classifyTx([leg(WETH, EOA, AMM, 10, 30000), leg(CRVUSD, CTRL, EOA, 20000, 20000)], c([EOA]));
+    assert.equal(r.kind, 'curve-borrow');
+    assert.equal(r.netUsd, 0);
+  });
+  test('repay, add collateral, close: the debt action names the tx', () => {
+    assert.equal(classifyTx([leg(CRVUSD, EOA, CTRL, 5000, 5000)], c([EOA])).kind, 'curve-repay');
+    assert.equal(classifyTx([leg(WETH, EOA, AMM, 2, 6000)], c([EOA])).kind, 'curve-deposit');
+    const close = classifyTx([leg(CRVUSD, EOA, CTRL, 20000, 20000), leg(WETH, AMM, EOA, 10, 30000)], c([EOA]));
+    assert.equal(close.kind, 'curve-repay');
+    assert.equal(classifyTx([leg(WETH, AMM, EOA, 1, 3000)], c([EOA])).kind, 'curve-withdraw');
+  });
+  test('without the registry the same legs are a contract interaction (swap), not a deposit', () => {
+    const r = classifyTx([leg(WETH, EOA, AMM, 10, 30000), leg(CRVUSD, CTRL, EOA, 20000, 20000)], ctx([EOA]));
+    assert.equal(r.kind, 'swap');
+  });
+  test('own legs still win: owner EOA funding a proxy that borrows is a receive in the proxy-only scope', () => {
+    const r = classifyTx([leg(ZERO, EOA, SAFE, 1, 3000), leg(CRVUSD, CTRL, SAFE, 20000, 20000)], c([SAFE]));
+    assert.equal(r.kind, 'receive');
+    assert.equal(r.netUsd, 3000);
   });
 });

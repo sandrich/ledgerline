@@ -89,6 +89,12 @@ const MIGRATIONS: ((db: MigrateDb) => void)[] = [
   },
   // 4: transactions ledger (lib/ledger)
   (db) => db.exec(LEDGER_SQL),
+  // 5: LEDGER: counterparty code cache, bridge pairs, smart wallet suggestions
+  (db) => db.exec(LEDGER_V5_SQL),
+  // 6: CRVUSD: Curve crvUSD / LlamaLend market registry and per snapshot position detail
+  (db) => db.exec(CURVE_SQL),
+  // 7: YIELD: per currency fx (EUR, CHF) migrated from the USD -> CHF table, daily Aave rate history
+  (db) => migrateYieldFx(db),
 ];
 
 /**
@@ -137,6 +143,57 @@ CREATE TABLE IF NOT EXISTS ledger_state (address_id INTEGER NOT NULL, chain TEXT
   updated_at INTEGER, error TEXT, PRIMARY KEY (address_id, chain));
 `;
 
+/**
+ * LEDGER v5 (lib/ledger, lib/scan/smart-wallets.ts):
+ * - address_code: eth_getCode cache per (chain, counterparty) at the latest block. is_contract = 1 for
+ *   contracts, 0 for EOAs (EIP-7702 delegated EOAs count as EOAs). Only EOA counterparties make
+ *   deposits / withdrawals.
+ * - bridge_pairs: Arbitrum native bridge transfers whose L1 leg and L2 leg both touch tracked
+ *   addresses; both legs are then classified as transfers between those addresses (internal).
+ *   l1_addr / l2_addr are the tracked addresses on each side.
+ * - smart_wallet_suggestions: Safes / DSProxies owned by a tracked EOA, one row per (chain, address).
+ *   status 'pending' | 'accepted' | 'dismissed'.
+ */
+const LEDGER_V5_SQL = `
+CREATE TABLE IF NOT EXISTS address_code (chain TEXT NOT NULL, address TEXT NOT NULL, is_contract INTEGER NOT NULL, checked_at INTEGER NOT NULL,
+  PRIMARY KEY (chain, address));
+CREATE TABLE IF NOT EXISTS bridge_pairs (l1_hash TEXT NOT NULL, l1_ref TEXT NOT NULL, l1_addr TEXT NOT NULL, l2_hash TEXT NOT NULL, l2_ref TEXT NOT NULL,
+  l2_addr TEXT NOT NULL, direction TEXT NOT NULL, PRIMARY KEY (l1_hash, l1_ref));
+CREATE UNIQUE INDEX IF NOT EXISTS bridge_pairs_l2 ON bridge_pairs(l2_hash, l2_ref);
+CREATE TABLE IF NOT EXISTS smart_wallet_suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, chain TEXT NOT NULL, address TEXT NOT NULL,
+  owner_address_id INTEGER NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER, updated_at INTEGER,
+  UNIQUE (chain, address));
+`;
+
+// ---------- 7: YIELD + FX ----------
+
+/**
+ * fx: units of a display currency per USD per calendar day (Frankfurter, forward filled), one row
+ * per (day, currency). The old fx(day, usd_chf) rows become currency 'CHF'. A fresh database already
+ * has the new shape from schema.sql, so this is a no-op there.
+ * aave_rates: daily Aave reserve state read at the daily backfill blocks (lib/history/aave-rates.ts):
+ * supply / variable borrow APY (fractions) and the liquidity / variable borrow index (ray / 1e27) at
+ * ts (the block's day start), only for reserves a tracked address held around that day.
+ */
+const FX_V7_SQL = `CREATE TABLE IF NOT EXISTS fx (day TEXT NOT NULL, currency TEXT NOT NULL, rate_from_usd REAL NOT NULL, PRIMARY KEY (day, currency));`;
+const AAVE_RATES_SQL = `
+CREATE TABLE IF NOT EXISTS aave_rates (chain TEXT NOT NULL, market TEXT NOT NULL, asset TEXT NOT NULL, ts INTEGER NOT NULL,
+  block INTEGER, supply_apy REAL, borrow_apy REAL, liquidity_index REAL, borrow_index REAL,
+  PRIMARY KEY (market, asset, ts));
+CREATE INDEX IF NOT EXISTS aave_rates_chain_ts ON aave_rates(chain, ts);
+`;
+
+function migrateYieldFx(db: MigrateDb): void {
+  const cols = new Set((db.prepare('PRAGMA table_info(fx)').all() as { name: string }[]).map((c) => c.name));
+  if (cols.has('usd_chf')) {
+    db.exec('ALTER TABLE fx RENAME TO fx_v6');
+    db.exec(FX_V7_SQL);
+    db.exec("INSERT OR IGNORE INTO fx (day, currency, rate_from_usd) SELECT day, 'CHF', usd_chf FROM fx_v6 WHERE usd_chf > 0");
+    db.exec('DROP TABLE fx_v6');
+  } else db.exec(FX_V7_SQL);
+  db.exec(AAVE_RATES_SQL);
+}
+
 export const SCHEMA_VERSION = MIGRATIONS.length;
 
 export function migrate(db: MigrateDb): number {
@@ -163,3 +220,27 @@ export function migrate(db: MigrateDb): number {
 }
 
 export default migrate;
+
+/**
+ * CRVUSD (lib/protocols/curve-crvusd.ts).
+ * - curve_markets: every crvUSD mint market (ControllerFactory) and LlamaLend market (OneWayLendingFactory)
+ *   per chain: controller, AMM, vault (lending only), collateral / borrowed token with symbol, decimals and
+ *   canonical price key, and the market key used in tokens.market (e.g. eth-crvusd-3-weth).
+ * - curve_positions: per (snapshot, address, controller) the raw position (collateral units, borrowed token
+ *   in the AMM bands while in soft liquidation, debt units), its USD values, Curve health as a fraction
+ *   (0 = liquidation, null without a loan) and the AMM borrow APY (live snapshots only). Written by live
+ *   snapshots and the daily backfill. Values / net worth come from balances + position_values as usual;
+ *   this table only carries the protocol specific detail.
+ */
+const CURVE_SQL = `
+CREATE TABLE IF NOT EXISTS curve_markets (chain TEXT NOT NULL, controller TEXT NOT NULL, kind TEXT NOT NULL, idx INTEGER NOT NULL,
+  amm TEXT NOT NULL, vault TEXT, collateral TEXT NOT NULL, borrowed TEXT NOT NULL, collateral_symbol TEXT, borrowed_symbol TEXT,
+  collateral_decimals INTEGER NOT NULL, borrowed_decimals INTEGER NOT NULL, collateral_key TEXT NOT NULL, borrowed_key TEXT NOT NULL,
+  market TEXT NOT NULL, PRIMARY KEY (chain, controller));
+CREATE UNIQUE INDEX IF NOT EXISTS curve_markets_kind_idx ON curve_markets(chain, kind, idx);
+CREATE TABLE IF NOT EXISTS curve_positions (snapshot_id INTEGER NOT NULL, address_id INTEGER NOT NULL, chain TEXT NOT NULL,
+  market TEXT NOT NULL, controller TEXT NOT NULL, protocol TEXT NOT NULL, collateral REAL, stablecoin REAL, debt REAL,
+  collateral_usd REAL, debt_usd REAL, health REAL, borrow_apy REAL, PRIMARY KEY (snapshot_id, address_id, controller));
+CREATE INDEX IF NOT EXISTS curve_positions_addr ON curve_positions(address_id);
+CREATE INDEX IF NOT EXISTS curve_positions_snap ON curve_positions(snapshot_id);
+`;

@@ -1,13 +1,10 @@
-// Daily price history (DefiLlama /chart) and USD->CHF FX history (Frankfurter).
+// Daily price history (DefiLlama /chart) and USD -> EUR / CHF FX history (Frankfurter).
 // Past daily prices are immutable: stored once, never overwritten.
 import {
   histDailyPriceRange,
   histEarliestStartTs,
-  histFxMaxDay,
-  histFxMinDay,
   histGetMeta,
   histInsertDailyPrices,
-  histInsertFx,
   histInsertHourlyPrices,
   histLoadPrices,
   histListNeededPriceKeys,
@@ -26,7 +23,7 @@ export interface SyncPriceHistoryOptions extends HistoryJobOptions {
   keys?: string[];
   /** Earliest day (unix seconds) needed; default: earliest discovery_state.start_ts, else 365 days ago. */
   fromTs?: number;
-  /** Also sync USD->CHF FX (default true). */
+  /** Also sync USD -> EUR / CHF FX (default true). */
   fx?: boolean;
 }
 
@@ -146,34 +143,59 @@ export async function syncPriceHistory(opts: SyncPriceHistoryOptions): Promise<S
   return { keys: keys.length, requests: jobs.length, inserted, fxInserted, failedKeys: [...failedKeys] };
 }
 
-/** USD->CHF daily from Frankfurter (business days), forward-filled to every calendar day up to the last published day. */
+/** Display currencies synced from Frankfurter (units of the currency per USD). */
+export const FX_SYNC_CURRENCIES = ['EUR', 'CHF'] as const;
+export type FxSyncCurrency = (typeof FX_SYNC_CURRENCIES)[number];
+
+function fxRange(db: HistoryJobOptions['db'], currency: string): { min: string | null; max: string | null } {
+  const r = db.prepare('SELECT MIN(day) AS mn, MAX(day) AS mx FROM fx WHERE currency = ?').get(currency) as { mn: string | null; mx: string | null };
+  return { min: r?.mn ?? null, max: r?.mx ?? null };
+}
+
+function insertFxRows(db: HistoryJobOptions['db'], currency: string, rows: { day: string; rate: number }[]): number {
+  const stmt = db.prepare('INSERT OR IGNORE INTO fx (day, currency, rate_from_usd) VALUES (?, ?, ?)');
+  let n = 0;
+  db.transaction(() => {
+    for (const r of rows) n += Number(stmt.run(r.day, currency, r.rate).changes);
+  })();
+  return n;
+}
+
+/**
+ * USD -> EUR / CHF daily from Frankfurter (business days, published around 16:00 CET), forward filled
+ * to every calendar day up to the last published day, per currency from `fromTs` (7 days earlier so
+ * a range starting on a weekend has a rate). Stored rows are immutable; only missing head / tail
+ * ranges are requested. Returns the number of new (day, currency) rows.
+ */
 export async function syncFx(opts: HistoryJobOptions, fromTs: number): Promise<number> {
   const { db, signal } = opts;
   const today = dayStart(nowSec());
-  const maxDay = histFxMaxDay(db);
-  const minDay = histFxMinDay(db);
-  const ranges: [number, number][] = [];
-  if (!minDay || parseIsoDay(minDay) > fromTs) ranges.push([fromTs - 7 * DAY, minDay ? parseIsoDay(minDay) - DAY : today]);
-  if (maxDay && parseIsoDay(maxDay) < today) ranges.push([parseIsoDay(maxDay) - 7 * DAY, today]);
   let inserted = 0;
-  for (const [s, e] of ranges) {
-    const j = await fetchJson<{ rates?: Record<string, { CHF?: number }> }>(`${FRANKFURTER}/${isoDay(s)}..${isoDay(e)}?from=USD&to=CHF`, {
-      signal,
-      retries: 4,
-    });
-    const published = Object.entries(j?.rates ?? {})
-      .filter(([, v]) => typeof v.CHF === 'number')
-      .map(([d, v]) => [parseIsoDay(d), v.CHF as number] as const)
-      .sort((a, b) => a[0] - b[0]);
-    if (!published.length) continue;
-    const rows: { day: string; usdChf: number }[] = [];
-    let idx = 0;
-    let last: number | null = null;
-    for (let d = published[0][0]; d <= published[published.length - 1][0]; d += DAY) {
-      while (idx < published.length && published[idx][0] <= d) last = published[idx++][1];
-      if (last != null && d >= fromTs - 7 * DAY) rows.push({ day: isoDay(d), usdChf: last });
+  for (const currency of FX_SYNC_CURRENCIES) {
+    const { min: minDay, max: maxDay } = fxRange(db, currency);
+    const ranges: [number, number][] = [];
+    if (!minDay || parseIsoDay(minDay) > fromTs) ranges.push([fromTs - 7 * DAY, minDay ? parseIsoDay(minDay) - DAY : today]);
+    if (maxDay && parseIsoDay(maxDay) < today) ranges.push([parseIsoDay(maxDay) - 7 * DAY, today]);
+    for (const [s, e] of ranges) {
+      if (e < s) continue;
+      const j = await fetchJson<{ rates?: Record<string, Record<string, number>> }>(`${FRANKFURTER}/${isoDay(s)}..${isoDay(e)}?from=USD&to=${currency}`, {
+        signal,
+        retries: 4,
+      });
+      const published = Object.entries(j?.rates ?? {})
+        .filter(([, v]) => typeof v?.[currency] === 'number' && v[currency] > 0)
+        .map(([d, v]) => [parseIsoDay(d), v[currency]] as const)
+        .sort((a, b) => a[0] - b[0]);
+      if (!published.length) continue;
+      const rows: { day: string; rate: number }[] = [];
+      let idx = 0;
+      let last: number | null = null;
+      for (let d = published[0][0]; d <= published[published.length - 1][0]; d += DAY) {
+        while (idx < published.length && published[idx][0] <= d) last = published[idx++][1];
+        if (last != null && d >= fromTs - 7 * DAY) rows.push({ day: isoDay(d), rate: last });
+      }
+      inserted += insertFxRows(db, currency, rows);
     }
-    inserted += histInsertFx(db, rows);
   }
   return inserted;
 }

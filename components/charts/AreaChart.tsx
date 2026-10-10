@@ -21,8 +21,8 @@ interface Props {
   /** daily points are plotted at their UTC day start; intraday ranges show time in the tooltip */
   intraday: boolean;
   height?: number;
-  /** total mode only: draw gross assets (debt not subtracted) as a dashed line */
-  showAssets?: boolean;
+  /** total mode only: draw the unleveraged comparison line (HistoryPoint.unleveredUsd) dashed */
+  showUnlevered?: boolean;
   /** stealth mode: no y-axis amounts, tooltip shows % change since the first visible point */
   stealth?: boolean;
 }
@@ -36,7 +36,7 @@ function niceStep(range: number, ticks: number): number {
   return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * mag;
 }
 
-export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, height = 300, showAssets = false, stealth = false }: Props) {
+export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, height = 300, showUnlevered = false, stealth = false }: Props) {
   const wrap = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(800);
   const [hover, setHover] = useState<number | null>(null);
@@ -53,16 +53,25 @@ export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, h
   const conv = useMemo(
     () =>
       points.map((p) => {
-        const r = currency === 'CHF' ? (rateAt(p.t) ?? 1) : 1;
+        const r = currency === 'USD' ? 1 : (rateAt(p.t) ?? 1);
         const series: Record<string, number> = {};
         for (const [k, v] of Object.entries(p.series)) series[k] = v * r;
         const debt = (p.debtUsd ?? 0) * r;
-        return { t: p.t, total: p.total * r, assets: p.assetsUsd != null ? p.assetsUsd * r : p.total * r + debt, debt, series, partial: !!p.partial, rate: r };
+        return {
+          t: p.t,
+          total: p.total * r,
+          assets: p.assetsUsd != null ? p.assetsUsd * r : p.total * r + debt,
+          unlev: p.unleveredUsd != null ? p.unleveredUsd * r : null,
+          debt,
+          series,
+          partial: !!p.partial,
+          rate: r,
+        };
       }),
     [points, currency, rateAt],
   );
 
-  const assetsOn = showAssets && !stacked;
+  const unlevOn = showUnlevered && !stacked && conv.some((p) => p.unlev != null);
   const h = height;
   const padL = stealth ? 14 : PAD.l;
   const iw = w - padL - PAD.r;
@@ -90,8 +99,8 @@ export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, h
     let lo = stacked ? 0 : Infinity;
     let hi = stacked ? 0 : -Infinity;
     for (const p of conv) {
-      hi = Math.max(hi, p.total, assetsOn ? p.assets : -Infinity);
-      lo = Math.min(lo, p.total, assetsOn ? p.assets : Infinity);
+      hi = Math.max(hi, p.total, unlevOn && p.unlev != null ? p.unlev : -Infinity);
+      lo = Math.min(lo, p.total, unlevOn && p.unlev != null ? p.unlev : Infinity);
     }
     for (const l of layers) for (const [a, b] of l) {
       hi = Math.max(hi, a, b);
@@ -109,7 +118,7 @@ export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, h
     }
     if (hi === lo) hi = lo + 1;
     return [lo, hi];
-  }, [conv, layers, stacked, assetsOn]);
+  }, [conv, layers, stacked, unlevOn]);
   const step = niceStep(ymax - ymin, 4);
   const yLo = Math.floor(ymin / step) * step;
   const yHi = Math.ceil(ymax / step) * step || step;
@@ -133,6 +142,20 @@ export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, h
   };
 
   const linePath = (vals: number[]) => vals.map((v, i) => `${i ? 'L' : 'M'}${x(conv[i].t).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  // gaps (null) start a new segment
+  const gapPath = (vals: (number | null)[]) => {
+    let d = '';
+    let pen = false;
+    vals.forEach((v, i) => {
+      if (v == null) {
+        pen = false;
+        return;
+      }
+      d += `${pen ? 'L' : 'M'}${x(conv[i].t).toFixed(1)},${y(v).toFixed(1)}`;
+      pen = true;
+    });
+    return d;
+  };
   const areaPath = (upper: number[], lower: number[]) => {
     if (!upper.length) return '';
     let d = linePath(upper);
@@ -259,8 +282,8 @@ export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, h
             ))
           ) : (
             <g>
-              {assetsOn && (
-                <path className="assets-line" d={linePath(conv.map((p) => p.assets))} fill="none" stroke="var(--oc)" strokeWidth={1.4} strokeDasharray="5 4" strokeLinejoin="round" opacity={0.55} />
+              {unlevOn && (
+                <path className="unlev-line" d={gapPath(conv.map((p) => p.unlev))} fill="none" stroke="var(--oc)" strokeWidth={1.5} strokeDasharray="5 4" strokeLinejoin="round" opacity={0.6} />
               )}
               <path d={areaPath(conv.map((p) => p.total), conv.map(() => Math.max(yLo, 0)))} fill="url(#area-fill)" />
               <path d={linePath(conv.map((p) => p.total))} fill="none" stroke="var(--accent)" strokeWidth={2} strokeLinejoin="round" />
@@ -273,7 +296,7 @@ export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, h
               layers.map((l, i) => <circle key={i} cx={x(hp.t)} cy={y(l[hover!][1])} r={4} fill={keys[i].color} />)
             ) : (
               <>
-                {assetsOn && <circle cx={x(hp.t)} cy={y(hp.assets)} r={3.5} fill="var(--surface)" stroke="var(--oc)" strokeWidth={1.5} />}
+                {unlevOn && hp.unlev != null && <circle cx={x(hp.t)} cy={y(hp.unlev)} r={3.5} fill="var(--surface)" stroke="var(--oc)" strokeWidth={1.5} />}
                 <circle cx={x(hp.t)} cy={y(hp.total)} r={4.5} fill="var(--accent)" />
               </>
             )}
@@ -312,11 +335,31 @@ export function AreaChart({ points, keys, stacked, currency, rateAt, intraday, h
             </span>
             <span>{stealth ? sinceStart(hp.total, first?.total) : money(hp.total)}</span>
           </div>
-          {!stacked && (assetsOn || hp.debt > 0.5) && (
+          {!stacked && hp.unlev != null && (unlevOn || hp.debt > 0.5) && (
             <>
               <div className="row">
                 <span>
                   <i className="sw sw-dash" aria-hidden="true" />
+                  Without leverage
+                </span>
+                <span>{stealth ? sinceStart(hp.unlev, first?.unlev ?? undefined) : money(hp.unlev)}</span>
+              </div>
+              <div className="row" title="Net worth minus the unleveraged line: what borrowing added or cost in this range">
+                <span>
+                  <i className="sw sw-blank" aria-hidden="true" />
+                  Leverage effect
+                </span>
+                <span className={hp.total - hp.unlev < -0.5 ? 'neg' : hp.total - hp.unlev > 0.5 ? 'pos' : undefined}>
+                  {stealth ? (hp.unlev > 0 ? fmtPct(hp.total / hp.unlev - 1) : '-') : fmtMoney(hp.total - hp.unlev, currency, 1, { decimals: 0, sign: true })}
+                </span>
+              </div>
+            </>
+          )}
+          {!stacked && hp.debt > 0.5 && (
+            <>
+              <div className="row">
+                <span>
+                  <i className="sw" style={{ background: 'var(--oc)' }} />
                   Assets
                 </span>
                 <span>{stealth ? sinceStart(hp.assets, first?.assets) : money(hp.assets)}</span>

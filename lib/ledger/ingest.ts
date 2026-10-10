@@ -6,7 +6,9 @@
 //   3. tx rows (block, ts, sender when known) and tx_addresses for every TRACKED participant
 // Then, for the whole chain: token amounts where decimals became known, USD at the day's price where
 // a daily price exists (aTokens / debt tokens via the underlying key in tokens.price_key), and the gas
-// fee of transactions sent by a tracked EOA (eth_getTransactionReceipt, capped per run).
+// fee of transactions sent by a tracked EOA (eth_getTransactionReceipt, capped per run), and the
+// eth_getCode of every new counterparty (address_code: only EOAs make deposits / withdrawals).
+// Finally the Arbitrum bridge legs of all tracked addresses are re-paired (bridge_pairs).
 // Re-running over an overlapping range is idempotent (primary keys + ON CONFLICT DO NOTHING).
 import { fetchTokenMeta } from '../history/aave';
 import { ETH_KEY, canonicalPriceKey } from '../history/price-keys';
@@ -15,6 +17,7 @@ import { DAY, NATIVE_TOKEN, dayStart, nowSec, throwIfAborted, type Db, type Hist
 import { scanListAddresses, SCAN_CHAINS, type ScanAddress } from '../db/repos-scan';
 import { HEAD_LAG, headBlock, latestRpc } from '../scan/rpc-latest';
 import { errMsg, type Logger } from '../scan/log';
+import { rebuildBridgePairs } from './bridge';
 import { APPROVAL_TOPIC, CallStats, TRANSFER_TOPIC, alchemyUrl, fetchLogs, fetchNative, type AlchemyTransfer, type RawLog } from './sources';
 
 export interface RunLedgerOptions {
@@ -25,6 +28,8 @@ export interface RunLedgerOptions {
   chains?: HistoryChain[];
   /** max eth_getTransactionReceipt calls per chain and run (gas fees), default 2000 */
   receiptBudget?: number;
+  /** max eth_getCode calls per chain and run (counterparty EOA / contract), default 3000 */
+  codeBudget?: number;
   onProgress?: (done: number, total: number) => void;
 }
 
@@ -45,6 +50,8 @@ export interface RunLedgerResult {
   amountsFilled: number;
   pricesFilled: number;
   feesFetched: number;
+  codesChecked: number;
+  bridgePairs: number;
   durationMs: number;
 }
 
@@ -433,6 +440,51 @@ async function fillFees(db: Db, chain: HistoryChain, own: Map<string, number>, b
   return n;
 }
 
+/** True for runtime code that makes an address a contract; EIP-7702 delegated EOAs (0xef0100 + address) stay EOAs. */
+export function isContractCode(code: string | null | undefined): boolean {
+  const c = (code ?? '0x').toLowerCase();
+  if (c === '0x' || c === '0x0' || c === '') return false;
+  if (c.startsWith('0xef0100') && c.length === 2 + 46) return false;
+  return true;
+}
+
+/** eth_getCode (latest) for counterparties of tracked value legs not checked yet; capped per run. */
+async function fillCodes(db: Db, chain: HistoryChain, own: Map<string, number>, budget: number, stats: CallStats, log: Logger, signal?: AbortSignal): Promise<number> {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT tt.from_addr, tt.to_addr FROM tx_transfers tt LEFT JOIN tokens t ON t.chain = tt.chain AND t.address = tt.token
+       WHERE tt.chain = ? AND tt.kind_hint IN ('erc20', 'native') AND COALESCE(t.spam, 0) = 0`,
+    )
+    .all(chain) as { from_addr: string; to_addr: string }[];
+  const known = new Set((db.prepare('SELECT address FROM address_code WHERE chain = ?').all(chain) as { address: string }[]).map((r) => r.address));
+  const todo = new Set<string>();
+  for (const r of rows) {
+    const fromOwn = own.has(r.from_addr);
+    if (fromOwn === own.has(r.to_addr)) continue;
+    const other = fromOwn ? r.to_addr : r.from_addr;
+    if (other !== NATIVE_TOKEN && !known.has(other)) todo.add(other);
+  }
+  const list = [...todo].slice(0, budget);
+  if (!list.length) return 0;
+  const rpc = latestRpc(chain, log);
+  const ins = db.prepare('INSERT INTO address_code (chain, address, is_contract, checked_at) VALUES (?, ?, ?, ?) ON CONFLICT(chain, address) DO UPDATE SET is_contract = excluded.is_contract, checked_at = excluded.checked_at');
+  let n = 0;
+  for (const a of list) {
+    throwIfAborted(signal);
+    try {
+      stats.rpc++;
+      const code = await rpc.request<string>('eth_getCode', [a, 'latest'], signal, 4);
+      ins.run(chain, a, isContractCode(code) ? 1 : 0, nowSec());
+      n++;
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      log.debug(`ledger ${chain}: eth_getCode ${a} failed`, { error: errMsg(e) });
+    }
+  }
+  if (todo.size > list.length) log.info(`ledger ${chain}: ${todo.size - list.length} counterparties left for the code check of the next run`);
+  return n;
+}
+
 // ---------------------------------------------------------------------------------------------
 
 export async function runLedger(opts: RunLedgerOptions): Promise<RunLedgerResult> {
@@ -442,7 +494,7 @@ export async function runLedger(opts: RunLedgerOptions): Promise<RunLedgerResult
   const all = scanListAddresses(db);
   const own = new Map(all.map((a) => [a.address.toLowerCase(), a.id]));
   const targets = opts.addressIds ? all.filter((a) => opts.addressIds!.includes(a.id)) : all;
-  const result: RunLedgerResult = { pairs: [], stats: new CallStats(), amountsFilled: 0, pricesFilled: 0, feesFetched: 0, durationMs: 0 };
+  const result: RunLedgerResult = { pairs: [], stats: new CallStats(), amountsFilled: 0, pricesFilled: 0, feesFetched: 0, codesChecked: 0, bridgePairs: 0, durationMs: 0 };
   const total = targets.reduce((s, a) => s + chains.filter((c) => a.chains.includes(c)).length, 0);
   let done = 0;
 
@@ -485,6 +537,7 @@ export async function runLedger(opts: RunLedgerOptions): Promise<RunLedgerResult
         result.amountsFilled += await fillAmounts(db, chain, head, log, signal);
         result.feesFetched += await fillFees(db, chain, own, opts.receiptBudget ?? 2000, stats, log, signal);
         result.pricesFilled += fillUsd(db, chain);
+        result.codesChecked += await fillCodes(db, chain, own, opts.codeBudget ?? 3000, stats, log, signal);
       } catch (e) {
         if (signal?.aborted) throw e;
         log.warn(`ledger ${chain}: enrichment failed`, { error: errMsg(e) });
@@ -492,10 +545,17 @@ export async function runLedger(opts: RunLedgerOptions): Promise<RunLedgerResult
       result.stats.add(stats);
     }),
   );
+  try {
+    result.bridgePairs = rebuildBridgePairs(db, new Set(own.keys()));
+  } catch (e) {
+    log.warn('ledger: bridge pairing failed', { error: errMsg(e) });
+  }
   result.durationMs = Date.now() - t0;
   log.info(`ledger finished in ${(result.durationMs / 1000).toFixed(1)}s`, {
     pairs: result.pairs.length,
     newTransfers: result.pairs.reduce((s, p) => s + p.newTransfers, 0),
+    codesChecked: result.codesChecked,
+    bridgePairs: result.bridgePairs,
     calls: { ...result.stats },
   });
   return result;

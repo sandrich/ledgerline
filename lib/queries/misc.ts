@@ -1,6 +1,6 @@
 // Price series, FX, health, jobs list.
 import { statSync } from 'node:fs';
-import type { FxResponse, HealthResponse, HistoryRange, JobsResponse, PricesResponse } from './api-types';
+import type { HealthResponse, HistoryRange, JobsResponse, PricesResponse } from './api-types';
 import { all, get, jsonIds, nowSec, type QDb } from './db';
 import { backfillProgress, emptyBackfill, jobsSummary, listJobs } from './jobs';
 import { DAY, MAX_POINTS, RANGE_SECONDS } from './meta';
@@ -52,13 +52,8 @@ export function getPriceSeries(db: QDb, keys: string[], range: HistoryRange, now
   return { range, series };
 }
 
-export function getFx(db: QDb): FxResponse {
-  const rows = all<{ day: string; usd_chf: number }>(db, 'SELECT day, usd_chf FROM fx ORDER BY day');
-  const daily: Record<string, number> = {};
-  for (const r of rows) if (r.usd_chf != null) daily[r.day] = r.usd_chf;
-  const last = rows.length ? rows[rows.length - 1] : null;
-  return { latest: last ? { day: last.day, usdChf: last.usd_chf } : null, daily };
-}
+// moved to lib/queries/fx.ts (per currency rates since migration 7)
+export { getFx } from './fx';
 
 const HEARTBEAT_KEYS = ['worker_heartbeat', 'worker.heartbeat', 'workerHeartbeatAt', 'heartbeat'];
 

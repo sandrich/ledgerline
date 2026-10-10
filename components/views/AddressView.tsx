@@ -4,11 +4,12 @@ import Link from 'next/link';
 import { useState } from 'react';
 import type { AddressDetailResponse, TokenRow } from '../../lib/queries/api-types';
 import { HistoryCard, RangePills } from '../charts/HistoryCard';
-import { CHAIN_LABEL, MARKET_LABEL, fmtAmount, fmtDate, fmtMoney, fmtPrice, shortAddr } from '../format';
+import { CHAIN_LABEL, MARKET_LABEL, curveMarketLabel, fmtAmount, fmtDate, fmtHf, fmtMoney, fmtPrice, fmtShare, shortAddr } from '../format';
 import { useApi, useApp } from '../layout/Providers';
 import { RecentActivity } from '../tx/TxList';
 import { useScopeRange } from './PortfolioView';
 import { BackfillBanner, ChangeText, ErrorCard, Hero, HfMeter, PageSkeleton, backfillText, chainColor } from './parts';
+import { YieldCard, useYield } from './YieldCards';
 
 function TokenLogo({ logo, symbol }: { logo: string | null | undefined; symbol: string }) {
   const [broken, setBroken] = useState(false);
@@ -71,6 +72,7 @@ export function AddressView({ address }: { address: string }) {
   const { currency, rate } = useApp();
   const [range, setRange] = useScopeRange(`address:${address}`, 'all');
   const [showHidden, setShowHidden] = useState(false);
+  const yieldSel = useYield(`address:${address}`, range);
 
   if (loading) return <PageSkeleton />;
   if (error && !data) return <ErrorCard message={error} onRetry={reload} />;
@@ -152,36 +154,69 @@ export function AddressView({ address }: { address: string }) {
           )}
         </section>
 
-        {data.protocols.map((p) => (
-          <section key={`${p.market}-${p.chain}`} className="card span-12 protocol">
-            <div className="card-head">
-              <h3>
-                <i className="ph ph-bank" aria-hidden="true" />
-                {MARKET_LABEL[p.market] ?? p.market}
-                <span className="pill">{CHAIN_LABEL[p.chain] ?? p.chain}</span>
-              </h3>
-              <span className="proto-head">
-                <span className="muted small">Health factor</span>
-                <HfMeter hf={p.healthFactor} hasDebt={p.borrowedUsd > 0} />
-                <span className="num total">{fmtMoney(p.netUsd, currency, rate)}</span>
-              </span>
-            </div>
-            <div className="proto-grid">
-              <div>
-                <h4>
-                  Supplied <span className="num muted">{fmtMoney(p.suppliedUsd, currency, rate)}</span>
-                </h4>
-                {p.supplied.length ? <TokenTable rows={p.supplied} caption="Supplied" /> : <div className="empty slim">Nothing supplied</div>}
+        {data.protocols.map((p) => {
+          const isCurve = p.protocol !== 'aave-v3';
+          const loan = isCurve ? data.curve?.find((c) => c.market === p.market && c.chain === p.chain) : undefined;
+          const hf = isCurve ? (loan?.healthFactorLike ?? null) : p.healthFactor;
+          return (
+            <section key={`${p.market}-${p.chain}`} className="card span-12 protocol">
+              <div className="card-head">
+                <h3>
+                  <i className={`ph ${isCurve ? 'ph-vault' : 'ph-bank'}`} aria-hidden="true" />
+                  {isCurve ? curveMarketLabel(p.market, p.protocol, loan?.collateralSymbol) : (MARKET_LABEL[p.market] ?? p.market)}
+                  <span className="pill">{CHAIN_LABEL[p.chain] ?? p.chain}</span>
+                </h3>
+                <span className="proto-head">
+                  <span
+                    className="muted small"
+                    title={isCurve && loan?.health != null ? `Curve health ${fmtShare(loan.health, 1)}, shown on the Aave scale (1 = liquidation): ${fmtHf(loan.healthFactorLike)}` : undefined}
+                  >
+                    {isCurve ? 'Health (Aave scale)' : 'Health factor'}
+                  </span>
+                  <HfMeter hf={hf} hasDebt={p.borrowedUsd > 0} />
+                  <span className="num total">{fmtMoney(p.netUsd, currency, rate)}</span>
+                </span>
               </div>
-              <div>
-                <h4>
-                  Borrowed <span className="num muted">{fmtMoney(p.borrowedUsd, currency, rate)}</span>
-                </h4>
-                {p.borrowed.length ? <TokenTable rows={p.borrowed} caption="Borrowed" borrowed /> : <div className="empty slim">No debt</div>}
+              {loan && (loan.softLiquidation || loan.borrowApy != null || loan.health != null) && (
+                <div className={`curve-note${loan.softLiquidation ? ' danger' : ''}`}>
+                  {loan.health != null && (
+                    <span>
+                      Curve health <b className="num">{fmtShare(loan.health, 1)}</b>
+                    </span>
+                  )}
+                  {loan.borrowApy != null && (
+                    <span>
+                      Borrow APY <b className="num">{fmtShare(loan.borrowApy, 2)}</b>
+                    </span>
+                  )}
+                  {loan.softLiquidation ? (
+                    <span>
+                      <i className="ph ph-warning-diamond" aria-hidden="true" /> Soft liquidation: <b className="num">{fmtAmount(loan.stablecoin)}</b> {loan.borrowedSymbol} of the collateral is
+                      converted
+                    </span>
+                  ) : (
+                    <span className="muted">Not in soft liquidation</span>
+                  )}
+                </div>
+              )}
+              <div className="proto-grid">
+                <div>
+                  <h4>
+                    {isCurve ? 'Collateral' : 'Supplied'} <span className="num muted">{fmtMoney(p.suppliedUsd, currency, rate)}</span>
+                  </h4>
+                  {p.supplied.length ? <TokenTable rows={p.supplied} caption={isCurve ? 'Collateral' : 'Supplied'} /> : <div className="empty slim">Nothing supplied</div>}
+                </div>
+                <div>
+                  <h4>
+                    {isCurve ? 'Debt' : 'Borrowed'} <span className="num muted">{fmtMoney(p.borrowedUsd, currency, rate)}</span>
+                  </h4>
+                  {p.borrowed.length ? <TokenTable rows={p.borrowed} caption={isCurve ? 'Debt' : 'Borrowed'} borrowed /> : <div className="empty slim">No debt</div>}
+                </div>
               </div>
-            </div>
-          </section>
-        ))}
+            </section>
+          );
+        })}
+        {yieldSel.data && (yieldSel.data.method !== 'none' || yieldSel.data.gasUsd > 0.005) && <YieldCard data={yieldSel.data} loading={yieldSel.loading} range={range} className="card span-12" />}
       </div>
     </div>
   );

@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS address_tokens (address_id INTEGER NOT NULL, chain TE
 CREATE TABLE IF NOT EXISTS discovery_state (address_id INTEGER NOT NULL, chain TEXT NOT NULL, last_block INTEGER, start_block INTEGER, start_ts INTEGER, backfill_done_days INTEGER DEFAULT 0, backfill_total_days INTEGER DEFAULT 0, PRIMARY KEY (address_id, chain));
 CREATE TABLE IF NOT EXISTS blocks (chain TEXT NOT NULL, ts INTEGER NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (chain, ts));
 CREATE TABLE IF NOT EXISTS prices (price_key TEXT NOT NULL, ts INTEGER NOT NULL, usd REAL NOT NULL, granularity TEXT NOT NULL, PRIMARY KEY (price_key, granularity, ts));
-CREATE TABLE IF NOT EXISTS fx (day TEXT PRIMARY KEY, usd_chf REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS fx (day TEXT NOT NULL, currency TEXT NOT NULL, rate_from_usd REAL NOT NULL, PRIMARY KEY (day, currency));
 CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, kind TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS snapshots_kind_ts ON snapshots(kind, ts);
 CREATE TABLE IF NOT EXISTS balances (snapshot_id INTEGER NOT NULL, address_id INTEGER NOT NULL, chain TEXT NOT NULL, token TEXT NOT NULL, amount_raw TEXT, amount REAL, usd REAL, protocol TEXT, side TEXT);

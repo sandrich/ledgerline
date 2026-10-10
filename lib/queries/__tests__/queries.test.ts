@@ -8,7 +8,7 @@ import { after, before, describe, test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { addAddressToWallet, createWallet, enqueueSync, removeAddressFromWallet, updateAddress } from '../../db/repos-api';
 import type { QDb } from '../db';
-import { buildSeries, downsample, getHistory } from '../history';
+import { buildSeries, downsample, downsampleExtremes, getHistory } from '../history';
 import type { HistoryPoint, HistoryRange } from '../api-types';
 import { getAddressDetail, getOverview, getWalletDetail } from '../portfolio';
 import { parseScope } from '../scope';
@@ -28,7 +28,7 @@ CREATE TABLE address_tokens (address_id INTEGER NOT NULL, chain TEXT NOT NULL, t
 CREATE TABLE discovery_state (address_id INTEGER NOT NULL, chain TEXT NOT NULL, last_block INTEGER, start_block INTEGER, start_ts INTEGER, backfill_done_days INTEGER DEFAULT 0, backfill_total_days INTEGER DEFAULT 0, PRIMARY KEY (address_id, chain));
 CREATE TABLE blocks (chain TEXT NOT NULL, ts INTEGER NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (chain, ts));
 CREATE TABLE prices (price_key TEXT NOT NULL, ts INTEGER NOT NULL, usd REAL NOT NULL, granularity TEXT NOT NULL, PRIMARY KEY (price_key, granularity, ts));
-CREATE TABLE fx (day TEXT PRIMARY KEY, usd_chf REAL NOT NULL);
+CREATE TABLE fx (day TEXT NOT NULL, currency TEXT NOT NULL, rate_from_usd REAL NOT NULL, PRIMARY KEY (day, currency));
 CREATE TABLE snapshots (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, kind TEXT NOT NULL);
 CREATE TABLE balances (snapshot_id INTEGER NOT NULL, address_id INTEGER NOT NULL, chain TEXT NOT NULL, token TEXT NOT NULL, amount_raw TEXT, amount REAL, usd REAL, protocol TEXT, side TEXT);
 CREATE TABLE position_values (snapshot_id INTEGER NOT NULL, address_id INTEGER NOT NULL, chain TEXT NOT NULL, protocol TEXT NOT NULL, usd REAL NOT NULL);
@@ -379,6 +379,28 @@ describe('history series', () => {
     assert.deepEqual(buildSeries(db, { addressIds: [], from: 0, to: NOW, groupKey: () => null }), []);
   });
 
+  test('downsampling keeps a one-day spike and dip', () => {
+    const db = openDb();
+    seedTokens(db);
+    const w = insertWallet(db, 'W');
+    const a = insertAddress(db, 1);
+    link(db, w, a);
+    for (let i = 0; i < 1000; i++) {
+      const usd = i === 401 ? 5000 : i === 702 ? 1 : 100;
+      slice(db, 'daily', TODAY - (1000 - i) * DAY, a, 'arbitrum', [{ token: WETH, amount: 1, usd }]);
+    }
+    const h = getHistory(db, { kind: 'all' }, 'all', 'none', NOW)!;
+    assert.ok(h.points.length <= 400, `got ${h.points.length}`);
+    assert.equal(Math.max(...h.points.map((p) => p.total)), 5000);
+    assert.equal(Math.min(...h.points.map((p) => p.total)), 1);
+    const s = downsampleExtremes(
+      Array.from({ length: 5000 }, (_, i) => i),
+      Array.from({ length: 5000 }, (_, i) => (i === 1234 ? 9 : 0)),
+      400,
+    );
+    assert.ok(s.size <= 400 && s.has(1234) && s.has(0) && s.has(4999));
+  });
+
   test('scope parsing', () => {
     assert.deepEqual(parseScope('all'), { kind: 'all' });
     assert.deepEqual(parseScope('wallet:3'), { kind: 'wallet', walletId: 3 });
@@ -726,5 +748,43 @@ describe('history assets and debt', () => {
         assert.ok(Math.abs(p.endUsd - h.points[h.points.length - 1].total) < 1e-9, `${scope.kind} ${r} endUsd`);
       }
     }
+  });
+});
+
+describe('FRONTEND: Curve loans next to Aave', () => {
+  test('curve-crvusd rows are not Aave markets, but count in totals, byProtocol and the address protocols', () => {
+    const db = openDb();
+    seedTokens(db);
+    const AMM = '0x5a5a00000000000000000000000000000000ca01';
+    const CONTROLLER = '0x5a5a00000000000000000000000000000000ca02';
+    const WETH_L1 = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
+    const ins = db.prepare('INSERT INTO tokens (chain, address, symbol, name, decimals, kind, underlying, market, price_key, logo, spam) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)');
+    ins.run('ethereum', AMM, 'WETH', 'WETH', 18, 'curve-collateral', WETH_L1, 'eth-crvusd-3-weth', 'coingecko:ethereum');
+    ins.run('ethereum', CONTROLLER, 'crvUSD', 'crvUSD', 18, 'curve-debt', '0xf939e0a03fb07f59a73314e73794be0e57ac1b4e', 'eth-crvusd-3-weth', 'coingecko:crvusd');
+    const w = insertWallet(db, 'W');
+    const a = insertAddress(db, 1);
+    link(db, w, a);
+    slice(db, 'live', NOW - 300, a, 'arbitrum', [
+      { token: AWETH, amount: 4, usd: 10000, protocol: 'aave-v3', side: 'supply' },
+      { token: VDUSDC, amount: 2000, usd: -2000, protocol: 'aave-v3', side: 'borrow' },
+    ], { market: 'arb-core', hf: 4, collateral: 10000, debt: 2000 });
+    slice(db, 'live', NOW - 300, a, 'ethereum', [
+      { token: AMM, amount: 2, usd: 5000, protocol: 'curve-crvusd', side: 'supply' },
+      { token: CONTROLLER, amount: 3000, usd: -3000, protocol: 'curve-crvusd', side: 'borrow' },
+    ]);
+    const o = getOverview(db, NOW);
+    assert.deepEqual(o.aave.positions.map((p) => p.market), ['arb-core']);
+    assert.equal(o.aave.borrowedUsd, 2000);
+    assert.equal(o.totals.netUsd, 10000);
+    const proto = Object.fromEntries(o.byProtocol.map((p) => [p.key, p.usd]));
+    assert.equal(proto['curve-crvusd'], 2000);
+    assert.equal(o.byProtocol.find((p) => p.key === 'curve-crvusd')?.label, 'Curve crvUSD');
+    // no curve_positions table in this schema: the detail list is empty, not an error
+    assert.deepEqual(o.curve, []);
+    const d = getAddressDetail(db, addr(1), NOW)!;
+    const curve = d.protocols.find((p) => p.market === 'eth-crvusd-3-weth');
+    assert.equal(curve?.protocol, 'curve-crvusd');
+    assert.equal(curve?.borrowedUsd, 3000);
+    assert.equal(d.protocols.find((p) => p.market === 'arb-core')?.protocol, 'aave-v3');
   });
 });

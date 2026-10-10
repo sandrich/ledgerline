@@ -62,6 +62,8 @@ async function main(): Promise<void> {
         amountsFilled: r.amountsFilled,
         pricesFilled: r.pricesFilled,
         feesFetched: r.feesFetched,
+        codesChecked: r.codesChecked,
+        bridgePairs: r.bridgePairs,
         rows: { tx: count('tx'), tx_transfers: count('tx_transfers'), tx_addresses: count('tx_addresses'), ledger_state: count('ledger_state') },
         pairs: r.pairs,
       },

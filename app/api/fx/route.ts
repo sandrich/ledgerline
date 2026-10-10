@@ -1,4 +1,4 @@
-import { getFx } from '../../../lib/queries/misc';
+import { getFx } from '../../../lib/queries/fx';
 import { getDb } from '../../../lib/queries/server-db';
 import { handle, json } from '../_lib/http';
 

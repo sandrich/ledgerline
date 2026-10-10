@@ -3,12 +3,12 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import type { HealthResponse } from '../../lib/queries/api-types';
-import { fmtAgo } from '../format';
+import { CURRENCIES, fmtAgo, type Currency } from '../format';
 import { apiSend, useApi, useApp } from './Providers';
 
 export function TopBar() {
   const path = usePathname() ?? '/';
-  const { currency, setCurrency, toast, bump, stealth, setStealth } = useApp();
+  const { currency, setCurrency, available, toast, bump, stealth, setStealth } = useApp();
   const { data: health } = useApi<HealthResponse>('/api/health', { pollMs: 30_000 });
   const [busy, setBusy] = useState(false);
   const [, force] = useState(0);
@@ -81,10 +81,17 @@ export function TopBar() {
           >
             <i className={`ph ${stealth ? 'ph-eye-slash' : 'ph-eye'}`} aria-hidden="true" />
           </button>
+          <select className="cur-select" value={currency} onChange={(e) => setCurrency(e.target.value as Currency)} aria-label="Currency">
+            {CURRENCIES.map((c) => (
+              <option key={c} value={c} disabled={!available(c)}>
+                {c}
+              </option>
+            ))}
+          </select>
           <div className="seg cur-seg" role="radiogroup" aria-label="Currency">
-            {(['USD', 'CHF'] as const).map((c) => (
-              <label key={c}>
-                <input type="radio" name="currency" value={c} checked={currency === c} onChange={() => setCurrency(c)} />
+            {CURRENCIES.map((c) => (
+              <label key={c} className={available(c) ? undefined : 'off'} title={available(c) ? undefined : `No USD/${c} rates synced yet`}>
+                <input type="radio" name="currency" value={c} checked={currency === c} disabled={!available(c)} onChange={() => setCurrency(c)} />
                 {c}
               </label>
             ))}

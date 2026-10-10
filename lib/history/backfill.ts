@@ -39,11 +39,14 @@ import {
   ReserveCache,
   type ReserveTokens,
 } from './aave';
+import { syncAaveRateHistory } from './aave-rates';
 import { fetchJson } from './http';
 import { MULTICALL3_DEPLOY_BLOCK, decodeUint, multicallAt, nativeBalanceCall, type HistCall } from './multicall';
 import { ETH_KEY, canonicalPriceKey } from './price-keys';
 import { priceForDayEnd, syncPriceHistory } from './prices';
 import { archiveRpc, type RpcPool } from './rpc';
+import { applyCurveToEntries, curvePriceKeys, prepareCurveHistory, readCurvePoint, valueCurvePoint, writeCurvePositions } from '../protocols/curve-crvusd';
+import { histFindSnapshot } from '../db/repos-history';
 import { computeStart } from './start';
 import {
   DAY,
@@ -145,6 +148,7 @@ export async function runBackfill(opts: RunBackfillOptions): Promise<BackfillRes
   for (const p of plans) {
     if (!p.addrs.length) continue;
     for (const r of p.reserves.all()) keys.add(r.priceKey);
+    for (const k of curvePriceKeys(db, p.chain, p.addrs.map((a) => a.addr.id))) keys.add(k);
     for (const a of p.addrs) {
       earliest = Math.min(earliest, a.startDay);
       for (const t of a.walletTokens) keys.add(tokenPriceKey(p.chain, t));
@@ -220,9 +224,16 @@ export async function runBackfill(opts: RunBackfillOptions): Promise<BackfillRes
       res.failed += stopped ? days.length - res.processed - res.failed : 0;
     }),
   );
+  // daily Aave rates / indices of the reserves held on the days just written (cheap, resumable)
+  try {
+    await syncAaveRateHistory({ db, log, signal, chains });
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    log.warn('aave rate history failed', { error: String(e).slice(0, 200) });
+  }
   result.durationMs = Date.now() - t0;
   log.info(`backfill finished in ${(result.durationMs / 1000).toFixed(1)}s`, { chains: result.chains });
-  const failed = Object.values(result.chains).reduce((n, c) => n + (c?.failed ?? 0), 0);
+  const failed =Object.values(result.chains).reduce((n, c) => n + (c?.failed ?? 0), 0);
   const planErrors = plans.flatMap((p) => p.planErrors);
   // Fail the job so it shows up as failed; the days stay "not done" and the next run retries them.
   if (planErrors.length) throw new Error(planErrors.join('; '));
@@ -249,6 +260,8 @@ async function planChain(
   const latest = Number(BigInt(await rpc.request<Hex>('eth_blockNumber', [], signal)));
   const added = await reserves.refreshAt(latest, signal);
   if (added) log.info(`backfill ${chain}: registered ${added} Aave reserves`);
+  // Curve crvUSD / LlamaLend markets and per-address loan discovery (may set redo markers, so before planning days)
+  await prepareCurveHistory(db, chain, addresses, rpc, latest, log, signal);
 
   for (const addr of addresses) {
     throwIfAborted(signal);
@@ -572,6 +585,20 @@ export async function processPoint(
     }
   });
 
+  // Curve crvUSD / LlamaLend positions of discovered (address, controller) pairs: separate multicall,
+  // no RPC for addresses without a Curve loan. crvUSD postdates Multicall3.
+  const curve = preMulticall
+    ? null
+    : await readCurvePoint(db, chain, rpc, block, addrs.map((ap, a) => ({ a, addressId: ap.addr.id, address: ap.addr.address })), { signal });
+  let curveVals: ReturnType<typeof valueCurvePoint> = [];
+  if (curve) {
+    await spec.beforeValue?.(curve.priceKeys);
+    curveVals = valueCurvePoint(curve, (k) => spec.price(k), (k, a) => {
+      if (spec.flagMissing && !entries[a].missingPriceKeys!.includes(k)) entries[a].missingPriceKeys!.push(k);
+    });
+    applyCurveToEntries(entries, curveVals);
+  }
+
   entries.forEach((e, a) => {
     e.positions.push({ protocol: 'wallet', usd: walletUsd[a] }); // always written: zero points chart as zero and mark the point done
     if (aaveAny[a]) e.positions.push({ protocol: 'aave-v3', usd: aaveUsd[a] });
@@ -579,6 +606,8 @@ export async function processPoint(
   const marketKeys = markets.map((m) => m.key);
   if (spec.kind === 'daily') {
     histWriteDailyChainDay(db, chain, spec.ts, marketKeys, entries);
+    const snap = curve ? histFindSnapshot(db, 'daily', spec.ts) : undefined;
+    if (snap != null) writeCurvePositions(db, snap, chain, entries.map((e) => e.addressId), curveVals);
     return true;
   }
   return histWriteHourlyChainHour(db, chain, spec.ts, marketKeys, entries) > 0;

@@ -17,6 +17,10 @@ export const KIND_META: Record<TxKind, { label: string; icon: string; tone: 'in'
   'aave-withdraw': { label: 'Aave Withdraw', icon: 'ph-tray-arrow-up', tone: 'aave' },
   'aave-borrow': { label: 'Aave Borrow', icon: 'ph-hand-coins', tone: 'aave' },
   'aave-repay': { label: 'Aave Repay', icon: 'ph-arrow-u-up-left', tone: 'aave' },
+  'curve-borrow': { label: 'Curve Borrow', icon: 'ph-hand-coins', tone: 'aave' },
+  'curve-repay': { label: 'Curve Repay', icon: 'ph-arrow-u-up-left', tone: 'aave' },
+  'curve-deposit': { label: 'Curve Deposit', icon: 'ph-tray-arrow-down', tone: 'aave' },
+  'curve-withdraw': { label: 'Curve Withdraw', icon: 'ph-tray-arrow-up', tone: 'aave' },
   approval: { label: 'Approval', icon: 'ph-seal-check', tone: 'muted' },
   spam: { label: 'Spam', icon: 'ph-warning', tone: 'muted' },
   other: { label: 'Contract call', icon: 'ph-dots-three-outline', tone: 'muted' },
@@ -100,15 +104,31 @@ function pad(n: number): string {
 
 export function TxRowItem({ row, compact = false }: { row: TxRow; compact?: boolean }) {
   const { currency, rateAt } = useApp();
-  const meta = KIND_META[row.kind] ?? KIND_META.other;
+  const bridge = row.bridge && row.kind === 'internal' ? row.bridge : null;
+  const meta = bridge ? { label: 'Bridge', icon: 'ph-bridge', tone: 'neutral' as const } : (KIND_META[row.kind] ?? KIND_META.other);
   const { legs, internal, own } = summarize(row);
-  const r = currency === 'CHF' ? rateAt(row.ts) : 1;
+  const r = currency === 'USD' ? 1 : rateAt(row.ts);
   const money = (v: number | null, sign = false) => fmtMoney(v, currency, r, { sign, compact: true });
   const d = new Date(row.ts * 1000);
   const firstInternal = internal[0];
 
   let detail: ReactNode;
-  if (row.kind === 'internal' && firstInternal) {
+  if (bridge) {
+    detail = (
+      <span className="tx-path">
+        {CHAIN_LABEL[bridge.from] ?? bridge.from}
+        <i className="ph ph-arrow-right" aria-hidden="true" />
+        {CHAIN_LABEL[bridge.to] ?? bridge.to}
+        {firstInternal && firstInternal.from !== firstInternal.to && (
+          <>
+            , <OwnBadge>{firstInternal.from}</OwnBadge>
+            <i className="ph ph-arrow-right" aria-hidden="true" />
+            <OwnBadge>{firstInternal.to}</OwnBadge>
+          </>
+        )}
+      </span>
+    );
+  } else if (row.kind === 'internal' && firstInternal) {
     detail = (
       <span className="tx-path">
         <OwnBadge>{firstInternal.from}</OwnBadge>
@@ -155,13 +175,14 @@ export function TxRowItem({ row, compact = false }: { row: TxRow; compact?: bool
   const more = lines.length - maxLines;
 
   const moved = row.kind === 'internal' ? internal.reduce((s, l) => s + (l.usd ?? 0), 0) : null;
-  const flowKind = row.kind === 'receive' || row.kind === 'send' || row.kind === 'other';
+  // 'other' is a contract interaction (e.g. a DeFi Saver recipe), never a deposit or withdrawal: neutral
+  const flowKind = row.kind === 'receive' || row.kind === 'send';
   let value: ReactNode;
   if (flowKind && row.netUsd != null && Math.abs(row.netUsd) >= 0.005) {
     value = <b className={`num ${row.netUsd < 0 ? 'neg' : 'pos'}`}>{money(row.netUsd, true)}</b>;
   } else if (moved != null && moved > 0) {
     value = (
-      <b className="num neu" title="Moved between your own addresses, not a deposit or withdrawal">
+      <b className="num neu" title={bridge ? 'Bridged between your own addresses, not a deposit or withdrawal' : 'Moved between your own addresses, not a deposit or withdrawal'}>
         {money(moved)}
       </b>
     );
@@ -171,7 +192,7 @@ export function TxRowItem({ row, compact = false }: { row: TxRow; compact?: bool
   }
 
   return (
-    <li className={`tx-row tone-${meta.tone}${row.kind === 'internal' ? ' is-internal' : ''}${compact ? ' compact' : ''}`}>
+    <li className={`tx-row tone-${meta.tone}${row.kind === 'internal' ? ' is-internal' : ''}${bridge ? ' is-bridge' : ''}${compact ? ' compact' : ''}`}>
       <span className="tx-when" title={`${fmtDate(row.ts)} ${pad(d.getHours())}:${pad(d.getMinutes())}`}>
         {compact ? (
           <>
@@ -196,6 +217,7 @@ export function TxRowItem({ row, compact = false }: { row: TxRow; compact?: bool
         <span className="tx-kind-text">
           <b>
             {meta.label}
+            {bridge && <span className="tx-sub-kind">{bridge.from === row.chain ? 'sent' : 'arrived'}</span>}
             <span className={`chain-badge chain-${row.chain}`}>{CHAIN_LABEL[row.chain] ?? row.chain}</span>
           </b>
           {detail}
@@ -225,7 +247,7 @@ export function TxRowItem({ row, compact = false }: { row: TxRow; compact?: bool
 /** Compact "Recent activity" card: the 5 newest transactions of a scope and a link to the full list. */
 export function RecentActivity({ scope, className = 'card span-12' }: { scope: string; className?: string }) {
   // approvals and bare contract calls are noise in a 5 row summary; the full list has them
-  const kinds = 'receive,send,internal,swap,aave-supply,aave-withdraw,aave-borrow,aave-repay';
+  const kinds = 'receive,send,internal,swap,aave-supply,aave-withdraw,aave-borrow,aave-repay,curve-borrow,curve-repay,curve-deposit,curve-withdraw';
   const { data, error, loading } = useApi<TransactionsResponse>(`/api/transactions?scope=${encodeURIComponent(scope)}&limit=5&kind=${kinds}`, { pollMs: 120_000 });
   const href = scope === 'all' ? '/transactions' : `/transactions?scope=${encodeURIComponent(scope)}`;
   return (

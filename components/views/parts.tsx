@@ -1,12 +1,32 @@
 'use client';
 import Link from 'next/link';
 import { useState, type ReactNode } from 'react';
-import type { AaveSummary, BackfillProgress, Breakdown, Change, FlowSummary, JobsResponse, LiquidationPoint, PnlPeriod, PnlSummary, PnlWindow, RiskSummary, Totals, TopToken } from '../../lib/queries/api-types';
+import type {
+  AaveSummary,
+  BackfillProgress,
+  Breakdown,
+  Change,
+  CurvePositionInfo,
+  FlowSummary,
+  JobsResponse,
+  LiquidationPoint,
+  PnlPeriod,
+  PnlSummary,
+  PnlWindow,
+  RatesResponse,
+  RiskSummary,
+  Totals,
+  TopToken,
+  YieldResponse,
+} from '../../lib/queries/api-types';
+import { pnlDisplay } from './pnl-display';
 import {
   CHAIN_COLOR,
   CHAIN_LABEL,
   MARKET_LABEL,
   MASK,
+  CUR_SYMBOL,
+  convert,
   fmtAmount,
   fmtDate,
   fmtHf,
@@ -21,7 +41,9 @@ import {
   hfTone,
   moneyParts,
   shortAddr,
+  curveMarketLabel,
 } from '../format';
+import { Sparkline } from '../charts/Sparkline';
 import { useApi, useApp } from '../layout/Providers';
 
 export function Hero({ eyebrow, title, em, sub, right }: { eyebrow: string; title: ReactNode; em: string; sub: ReactNode; right?: ReactNode }) {
@@ -71,18 +93,22 @@ function BigMoney({ usd }: { usd: number }) {
   );
 }
 
-/** Signed money for KPI values: "+$4'402" with the currency in small type, compact above 100k. */
-export function BigSigned({ usd }: { usd: number }) {
-  const { currency, rate, stealth } = useApp();
+/**
+ * Signed money for KPI values: "+$4'402" with the currency in small type, compact above 100k.
+ * `native`: the value is already in the display currency (no conversion).
+ */
+export function BigSigned({ usd, native = false }: { usd: number; native?: boolean }) {
+  const { currency, rate: latest, stealth } = useApp();
+  const rate = native ? 1 : latest;
   if (stealth) {
     return (
       <span className="masked">
-        <small className="pre">{currency === 'CHF' ? 'CHF' : '$'}</small>
+        <small className="pre">{CUR_SYMBOL[currency]}</small>
         {MASK}
       </span>
     );
   }
-  const v = currency === 'CHF' && rate ? usd * rate : usd;
+  const v = convert(usd, currency, rate);
   const abs = Math.abs(v);
   const zero = abs < 0.5; // rounds to 0: no sign, no color
   const sign = zero ? '' : v < 0 ? '-' : '+';
@@ -90,7 +116,7 @@ export function BigSigned({ usd }: { usd: number }) {
   return (
     <span className={zero ? undefined : v < 0 ? 'neg' : 'pos'}>
       {sign}
-      <small className="pre">{currency === 'CHF' ? 'CHF' : '$'}</small>
+      <small className="pre">{CUR_SYMBOL[currency]}</small>
       {body}
       {currency === 'CHF' && abs < 1e5 && <small>.-</small>}
     </span>
@@ -124,14 +150,16 @@ export const RANGE_TEXT: Record<PnlWindow, { short: string; long: string }> = {
 };
 
 function PnlKpi({ label, icon, p, since, pending, extra }: { label: string; icon: string; p: PnlPeriod | null | undefined; since?: boolean; pending?: boolean; extra?: ReactNode }) {
-  const has = p != null && p.pnlUsd != null;
+  const { currency, rate } = useApp();
+  const d = pnlDisplay(p, currency, rate);
+  const has = p != null && p.pnlUsd != null && d?.pnl != null;
   return (
     <div className="kpi" role="listitem">
       <div className="label">
         <i className={`ph ${icon}`} aria-hidden="true" />
         {label}
       </div>
-      <div className="value fit">{has ? <BigSigned usd={p.pnlUsd!} /> : '-'}</div>
+      <div className="value fit">{has ? <BigSigned usd={d!.pnl!} native /> : '-'}</div>
       <div className="sub">
         {!has ? (
           pending ? 'PnL pending' : 'not enough history yet'
@@ -145,12 +173,22 @@ function PnlKpi({ label, icon, p, since, pending, extra }: { label: string; icon
               'ROI n/a'
             )}
             {since && p.fromTs != null ? `, since ${fmtUtcDate(p.fromTs)}` : ''}
+            {d!.fx != null && (
+              <span className="sub-line wrap" title={`Part of the PnL that comes from USD moving against ${currency}: what you held in USD, times the change of the rate`}>
+                of which USD/{currency} <span className={`num ${signTone(d!.fx)}`}>{fmtMoney(d!.fx, currency, 1, { sign: true, decimals: 0, compact: true })}</span>
+              </span>
+            )}
             {extra}
           </>
         )}
       </div>
     </div>
   );
+}
+
+/** pos / neg / '' for whole amounts (below 0.5 prints as 0) */
+export function signTone(v: number | null | undefined): string {
+  return v == null || Math.abs(v) < 0.5 ? '' : v < 0 ? 'neg' : 'pos';
 }
 
 /** Most critical liquidation point (smallest drop) of a list, null when none is liquidatable. */
@@ -168,6 +206,7 @@ export function KpiStrip({
   range = '30d',
   flows,
   walletScope = false,
+  yield30,
 }: {
   totals: Totals;
   aave: AaveSummary;
@@ -178,6 +217,8 @@ export function KpiStrip({
   flows?: FlowSummary | null;
   /** wallet scope: transfers from other own wallets count as deposits */
   walletScope?: boolean;
+  /** Aave interest and gas of the last 30 days, for the net APY card */
+  yield30?: YieldResponse | null;
 }) {
   const { currency, rate } = useApp();
   const hf = aave.lowestHealthFactor;
@@ -188,9 +229,12 @@ export function KpiStrip({
   const netApy = risk?.netApy ?? null;
   const yieldUsd = risk?.annualYieldUsd ?? null;
   const sel = pnl?.[range] ?? null;
+  const selD = pnlDisplay(sel, currency, rate);
   const day = pnl?.['24h'] ?? null;
+  const dayD = pnlDisplay(day, currency, rate);
   const rt = RANGE_TEXT[range];
-  const signed = (v: number | null | undefined) => fmtMoney(v != null && Math.abs(v) < 0.5 ? 0 : v, currency, rate, { sign: true, decimals: 0, compact: true });
+  // values from pnlDisplay are already in the display currency
+  const signed = (v: number | null | undefined) => fmtMoney(v != null && Math.abs(v) < 0.5 ? 0 : v, currency, 1, { sign: true, decimals: 0, compact: true });
   const depositsTitle = walletScope ? 'Net deposits into this wallet, transfers from your other wallets included' : 'External deposits minus withdrawals, transfers between your own addresses excluded';
   return (
     <div className="kpis" role="list">
@@ -206,9 +250,9 @@ export function KpiStrip({
           <span>
             assets {fmtMoney(totals.assetsUsd, currency, rate, { compact: true })}, debt {fmtMoney(totals.debtUsd, currency, rate, { compact: true })}
           </span>
-          {day && day.pnlUsd != null && (
+          {day && dayD?.pnl != null && (
             <span>
-              24h <span className={`num ${day.pnlUsd < -0.5 ? 'neg' : day.pnlUsd > 0.5 ? 'pos' : ''}`}>{signed(day.pnlUsd)}</span>
+              24h <span className={`num ${signTone(dayD.pnl)}`}>{signed(dayD.pnl)}</span>
               {day.returnPct != null && (
                 <>
                   {' '}
@@ -225,17 +269,17 @@ export function KpiStrip({
           <i className="ph ph-arrows-down-up" aria-hidden="true" />
           Change ({rt.short})
         </div>
-        <div className="value fit">{sel?.changeUsd != null ? <BigSigned usd={sel.changeUsd} /> : '-'}</div>
+        <div className="value fit">{selD?.change != null ? <BigSigned usd={selD.change} native /> : '-'}</div>
         <div className="sub sub-lines">
-          {sel?.changeUsd == null ? (
+          {selD?.change == null ? (
             <span>{pnl ? 'not enough history yet' : 'pending'}</span>
           ) : (
             <>
-              <span title="Price moves on what you held">
-                PnL <span className={`num ${(sel.pnlUsd ?? 0) < -0.5 ? 'neg' : (sel.pnlUsd ?? 0) > 0.5 ? 'pos' : ''}`}>{signed(sel.pnlUsd)}</span>
+              <span title={currency === 'USD' ? 'Price moves on what you held' : `Price moves on what you held, plus the USD/${currency} effect`}>
+                PnL <span className={`num ${signTone(selD.pnl)}`}>{signed(selD.pnl)}</span>
               </span>
               <span title="Deposits, withdrawals, Aave interest and fees">
-                deposits / other <span className="num">{signed(sel.otherUsd)}</span>
+                deposits / other <span className="num">{signed(selD.pnl != null ? selD.change - selD.pnl : null)}</span>
               </span>
             </>
           )}
@@ -309,6 +353,12 @@ export function KpiStrip({
           ) : (
             'on Aave equity, rates pending'
           )}
+          {hasAave && yield30 && yield30.method !== 'none' && (
+            <span className="sub-line wrap" title="Aave interest of the last 30 days, valued at the time">
+              30d: paid <span className="num neg">{fmtMoney(-yield30.paidUsd, currency, rate, { decimals: 0, compact: true })}</span>, earned{' '}
+              <span className="num pos">{fmtMoney(yield30.earnedUsd, currency, rate, { sign: true, decimals: 0, compact: true })}</span>
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -381,7 +431,7 @@ export function chainColor(key: string): string {
 }
 
 export function protocolColor(key: string): string {
-  return key === 'aave-v3' ? 'var(--ccr)' : key === 'wallet' ? 'var(--oc)' : 'var(--tag)';
+  return key === 'aave-v3' ? 'var(--ccr)' : key === 'wallet' ? 'var(--oc)' : key === 'curve-crvusd' ? 'var(--c4)' : key === 'llamalend' ? 'var(--tag)' : 'var(--tag)';
 }
 
 /**
@@ -438,7 +488,7 @@ export function TopHoldings({ tokens, totals }: { tokens: TopToken[]; totals: To
       {borrowed.length > 0 && (
         <>
           <h4 className="borrowed-head">
-            Borrowed <span className="muted small">debt on Aave</span>
+            Borrowed <span className="muted small">debt</span>
           </h4>
           <ol className="rank holdings borrowed">
             {borrowed.map((r) => (
@@ -498,19 +548,70 @@ export function HfMeter({ hf, hasDebt }: { hf: number | null; hasDebt: boolean }
   );
 }
 
-export function AaveCard({ aave, className = 'card span-4' }: { aave: AaveSummary; className?: string }) {
+/** Supply / borrow APY rows of one Aave position with a sparkline of the rate over the range. */
+function ApyRows({ rates, market, chain }: { rates: RatesResponse; market: string; chain: string }) {
+  const rows: { key: string; symbol: string; side: 'supply' | 'borrow'; values: number[]; apy: number | null }[] = [];
+  for (const r of rates.reserves) {
+    if (r.market !== market || r.chain !== chain) continue;
+    for (const side of ['supply', 'borrow'] as const) {
+      if (side === 'supply' ? !r.supplied : !r.borrowed) continue;
+      const values = r.points.map((p) => (side === 'supply' ? p.supplyApy : p.borrowApy)).filter((v): v is number => v != null);
+      rows.push({ key: `${r.asset}-${side}`, symbol: r.symbol, side, values, apy: values.length ? values[values.length - 1] : null });
+    }
+  }
+  if (!rows.length) return null;
+  return (
+    <ul className="apy-rows" aria-label="Rates">
+      {rows.map((r) => (
+        <li key={r.key}>
+          <span className="apy-sym">
+            {r.symbol} <span className="muted">{r.side}</span>
+          </span>
+          <Sparkline values={r.values} color={r.side === 'supply' ? 'var(--c4)' : 'var(--c5)'} width={64} height={18} />
+          <span className={`num apy-val ${r.side === 'borrow' ? 'neg' : 'pos'}`}>{fmtShare(r.apy, 2)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function AaveCard({
+  aave,
+  curve,
+  rates,
+  ratesOpen,
+  onToggleRates,
+  className = 'card span-4',
+}: {
+  aave: AaveSummary;
+  /** Curve crvUSD / LlamaLend loans in scope, listed with the Aave positions */
+  curve?: CurvePositionInfo[];
+  /** rate history of the held reserves for the selected range: APY with a sparkline per asset */
+  rates?: RatesResponse | null;
+  ratesOpen?: boolean;
+  onToggleRates?: () => void;
+  className?: string;
+}) {
   const { currency, rate } = useApp();
+  const loans = curve ?? [];
+  const hasRates = !!rates && rates.reserves.some((r) => r.points.length > 0);
   return (
     <section className={className}>
       <div className="card-head">
         <h3>
           <i className="ph ph-bank" aria-hidden="true" />
-          Aave positions
+          {loans.length ? 'Lending positions' : 'Aave positions'}
         </h3>
-        <span className="hint">health factor</span>
+        {onToggleRates && hasRates ? (
+          <button type="button" className="link link-btn" aria-expanded={!!ratesOpen} aria-controls="rates-card" onClick={onToggleRates}>
+            {ratesOpen ? 'Hide rates' : 'Rate history'} <i className={`ph ${ratesOpen ? 'ph-caret-up' : 'ph-chart-line'}`} aria-hidden="true" />
+          </button>
+        ) : (
+          <span className="hint">health factor</span>
+        )}
       </div>
-      {!aave.positions.length ? (
-        <div className="empty slim">No open Aave V3 positions</div>
+      {!aave.positions.length && !loans.length ? (
+        <div className="empty slim">No open Aave V3 or Curve positions</div>
       ) : (
         <ul className="aave-list">
           {aave.positions.map((p) => (
@@ -539,6 +640,7 @@ export function AaveCard({ aave, className = 'card span-4' }: { aave: AaveSummar
                     </span>
                   )}
                 </div>
+                {rates && <ApyRows rates={rates} market={p.market} chain={p.chain} />}
                 {(() => {
                   const l = p.borrowedUsd > 0 ? mainLiquidation(p.liquidations) : null;
                   if (!l || l.dropPct == null) return null;
@@ -555,9 +657,64 @@ export function AaveCard({ aave, className = 'card span-4' }: { aave: AaveSummar
               </Link>
             </li>
           ))}
+          {loans.map((c) => (
+            <li key={`${c.addressId}-${c.market}`}>
+              <CurveRow c={c} />
+            </li>
+          ))}
         </ul>
       )}
     </section>
+  );
+}
+
+/** One Curve crvUSD / LlamaLend loan: collateral, debt, health on the Aave scale, soft liquidation. */
+export function CurveRow({ c, link = true }: { c: CurvePositionInfo; link?: boolean }) {
+  const { currency, rate } = useApp();
+  const body = (
+    <>
+      <div className="aave-main">
+        <b>{curveMarketLabel(c.market, c.protocol, c.collateralSymbol)}</b>
+        <span className="muted small">
+          {c.label ?? (c.address ? shortAddr(c.address) : 'loan')}, {CHAIN_LABEL[c.chain] ?? c.chain}
+        </span>
+      </div>
+      <span title={c.health != null ? `Curve health ${fmtShare(c.health, 1)}: the same headroom as an Aave health factor of ${fmtHf(c.healthFactorLike)}` : undefined}>
+        <HfMeter hf={c.healthFactorLike} hasDebt={c.debtUsd > 0} />
+      </span>
+      <div className="aave-nums">
+        <span>
+          <span className="muted">Collateral</span> <span className="num">{fmtAmount(c.collateral)}</span> {c.collateralSymbol}{' '}
+          <span className="num muted">{fmtMoney(c.collateralUsd, currency, rate, { compact: true })}</span>
+        </span>
+        <span>
+          <span className="muted">Debt</span> <span className="num">{fmtAmount(c.debt)}</span> {c.borrowedSymbol}
+        </span>
+        <span>
+          <span className="muted">Net</span> <b className="num">{fmtMoney(c.collateralUsd - c.debtUsd, currency, rate)}</b>
+        </span>
+        {c.borrowApy != null && (
+          <span>
+            <span className="muted">Borrow APY</span> <span className="num neg">{fmtShare(c.borrowApy, 2)}</span>
+          </span>
+        )}
+      </div>
+      {c.softLiquidation && (
+        <div className="aave-liq liq-danger">
+          <i className="ph ph-warning-diamond" aria-hidden="true" />
+          <span>
+            Soft liquidation: <b className="num">{fmtAmount(c.stablecoin)}</b> {c.borrowedSymbol} of the collateral is converted
+          </span>
+        </div>
+      )}
+    </>
+  );
+  return link && c.address ? (
+    <Link href={`/address/${c.address}`} className="aave-row">
+      {body}
+    </Link>
+  ) : (
+    <div className="aave-row">{body}</div>
   );
 }
 

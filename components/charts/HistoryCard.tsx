@@ -27,7 +27,7 @@ export function RangePills({ value, onChange }: { value: HistoryRange; onChange:
   );
 }
 
-const ASSETS_KEY = 'portfolio.showAssets';
+const UNLEV_KEY = 'portfolio.showUnlevered';
 
 const GROUP_LABEL: Record<GroupBy, string> = { none: 'Total', chain: 'Chain', wallet: 'Wallet', protocol: 'Protocol' };
 
@@ -48,17 +48,17 @@ export function HistoryCard({
   defaultGroup?: GroupBy;
 }) {
   const { currency, rateAt, stealth } = useApp();
-  const [showAssets, setShowAssetsState] = useState<boolean>(() => {
+  const [showUnlev, setShowUnlevState] = useState<boolean>(() => {
     try {
-      return localStorage.getItem(ASSETS_KEY) !== '0';
+      return localStorage.getItem(UNLEV_KEY) !== '0';
     } catch {
       return true;
     }
   });
-  const toggleAssets = () => {
-    setShowAssetsState((v) => {
+  const toggleUnlev = () => {
+    setShowUnlevState((v) => {
       try {
-        localStorage.setItem(ASSETS_KEY, v ? '0' : '1');
+        localStorage.setItem(UNLEV_KEY, v ? '0' : '1');
       } catch {
         /* ignore */
       }
@@ -100,11 +100,13 @@ export function HistoryCard({
   const pts = data?.points ?? [];
   const first = pts[0];
   const last = pts[pts.length - 1];
-  const fx = (t: number) => (currency === 'CHF' ? (rateAt(t) ?? 1) : 1);
+  const fx = (t: number) => (currency === 'USD' ? 1 : (rateAt(t) ?? 1));
   const delta = first && last ? last.total * fx(last.t) - first.total * fx(first.t) : null;
   const deltaPct = first && last && first.total > 0 ? last.total / first.total - 1 : null;
   const partialDays = pts.filter((p) => p.partial).length;
-  const hasDebt = pts.some((p) => (p.debtUsd ?? 0) > 1);
+  // without debt the unleveraged line equals net worth: nothing to compare
+  const hasDebt = pts.some((p) => (p.debtUsd ?? 0) > 1) && pts.some((p) => p.unleveredUsd != null);
+  const levEffect = last?.unleveredUsd != null ? (last.total - last.unleveredUsd) * fx(last.t) : null;
   const totalMode = groupBy === 'none';
   const r = 1; // values above are already converted
 
@@ -142,17 +144,35 @@ export function HistoryCard({
           ))}
         </div>
       )}
-      {totalMode && hasDebt && !loading && (
+      {totalMode && hasDebt && !loading && pts.length >= 2 && (
         <div className="legend chart-legend line-legend">
           <span className="ll-net">
             <i className="ll-sw" aria-hidden="true" />
             Net worth
           </span>
-          <button type="button" className={`ll-toggle${showAssets ? ' on' : ''}`} aria-pressed={showAssets} onClick={toggleAssets} title="Gross assets, debt not subtracted">
+          <button
+            type="button"
+            className={`ll-toggle${showUnlev ? ' on' : ''}`}
+            aria-pressed={showUnlev}
+            onClick={toggleUnlev}
+            title="The same deposits and withdrawals, but holding the gross assets without debt: below net worth when leverage paid off, above when it cost"
+          >
             <i className="ll-sw dash" aria-hidden="true" />
-            Assets (unleveraged)
-            {!stealth && last?.assetsUsd != null && <b className="num">{fmtMoney(last.assetsUsd * fx(last.t), currency, 1, { compact: true })}</b>}
+            Without leverage
+            {!stealth && last?.unleveredUsd != null && <b className="num">{fmtMoney(last.unleveredUsd * fx(last.t), currency, 1, { compact: true })}</b>}
           </button>
+          {levEffect != null && (
+            <span className="ll-effect" title="Net worth minus the unleveraged line at the end of the range">
+              leverage effect{' '}
+              <b className={`num ${levEffect < -0.5 ? 'neg' : levEffect > 0.5 ? 'pos' : ''}`}>
+                {stealth
+                  ? last!.unleveredUsd! > 0
+                    ? fmtPct(last!.total / last!.unleveredUsd! - 1)
+                    : '-'
+                  : fmtMoney(levEffect, currency, 1, { compact: true, sign: true })}
+              </b>
+            </span>
+          )}
         </div>
       )}
       {loading ? (
@@ -182,7 +202,7 @@ export function HistoryCard({
           currency={currency}
           rateAt={rateAt}
           intraday={range === '24h' || range === '7d'}
-          showAssets={showAssets && hasDebt}
+          showUnlevered={showUnlev && hasDebt}
           stealth={stealth}
         />
       )}

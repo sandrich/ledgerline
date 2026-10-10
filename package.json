@@ -35,7 +35,7 @@
     "start": "next start -p ${PORT:-8790} -H ${HOST:-127.0.0.1}",
     "worker": "tsx worker/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "NODE_OPTIONS=--experimental-sqlite tsx --test lib/queries/__tests__/queries.test.ts lib/ledger/__tests__/classify.test.ts",
+    "test": "NODE_OPTIONS=--experimental-sqlite tsx --test lib/queries/__tests__/queries.test.ts lib/ledger/__tests__/classify.test.ts lib/ledger/__tests__/flows-bridge.test.ts lib/ledger/__tests__/smart-wallets.test.ts lib/protocols/__tests__/curve-crvusd.test.ts lib/queries/__tests__/yield.test.ts",
     "scan-once": "tsx scripts/scan-once.ts",
     "backfill": "tsx scripts/backfill.ts",
     "hourly-backfill": "tsx scripts/hourly-backfill.ts",

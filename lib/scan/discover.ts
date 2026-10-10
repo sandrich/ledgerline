@@ -40,6 +40,7 @@ import { DAY, dayStart, throwIfAborted, type Db } from '../history/types';
 import { errMsg, type Logger } from './log';
 import { HEAD_LAG, headBlock, latestRpc, logsLatestRpc } from './rpc-latest';
 import { isSpam, nameLooksSpam } from './spam';
+import { discoverCurvePairs, refreshCurveMarkets } from '../protocols/curve-crvusd';
 import { fetchCurrentPrices, priceOf } from './valuation';
 
 export const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
@@ -308,6 +309,12 @@ export async function runDiscovery(opts: RunDiscoveryOptions): Promise<Discovery
         if (signal?.aborted) throw e;
         log.warn(`discovery ${chain}: Aave reserve refresh failed`, { error: errMsg(e) });
       }
+      try {
+        await refreshCurveMarkets(db, chain, rpc, head, log, signal);
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        log.warn(`discovery ${chain}: Curve market refresh failed`, { error: errMsg(e) });
+      }
       for (const a of addrs) {
         throwIfAborted(signal);
         try {
@@ -329,13 +336,27 @@ export async function runDiscovery(opts: RunDiscoveryOptions): Promise<Discovery
             // transactions ledger for the new (address, chain); runs on the history lane
             scanEnqueueJob(db, 'ledger', { addressId: a.id, chains: [chain] });
           }
-          if (r.firstRun || real.length) {
+          // Curve crvUSD / LlamaLend loans (UserState logs): a new market rewrites history from the first loan day
+          let curveNew = false;
+          try {
+            const cv = await discoverCurvePairs(db, chain, a, head, rpc, log, signal);
+            if (cv.redoFromDay != null) {
+              histRequestRedo(db, a.id, chain, cv.redoFromDay);
+              curveNew = true;
+            }
+          } catch (e) {
+            if (signal?.aborted) throw e;
+            log.warn(`discovery ${chain}: ${a.address} Curve loan scan failed, retried next run`, { error: errMsg(e) });
+          }
+          if (r.firstRun || real.length || curveNew) {
             const id = scanEnqueueJob(db, 'backfill', { addressId: a.id, chains: [chain] });
             result.backfillJobs.push(id);
             log.info(
               r.firstRun
                 ? `discovery ${chain}: first run for ${a.address} done, enqueued history backfill job ${id}`
-                : `discovery ${chain}: ${a.address} has ${real.length} new token(s), enqueued backfill job ${id}`,
+                : real.length
+                  ? `discovery ${chain}: ${a.address} has ${real.length} new token(s), enqueued backfill job ${id}`
+                  : `discovery ${chain}: ${a.address} has new Curve loan market(s), enqueued backfill job ${id}`,
               real.length ? { tokens: real } : undefined,
             );
           }

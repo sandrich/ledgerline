@@ -8,6 +8,7 @@ import type { AddressSummary, Chain, WalletWithAddresses, WalletsResponse } from
 import { CHAIN_LABEL, fmtMoney, shortAddr } from '../format';
 import { apiSend, useApi, useApp } from '../layout/Providers';
 import { ErrorCard, Hero, PageSkeleton, backfillText } from './parts';
+import { SuggestionsBanner } from './YieldCards';
 
 const COLORS = ['#ea5a1f', '#2f2c27', '#c4920f', '#4f8a3e', '#c94343', '#5b6fb5'];
 const CHAINS: Chain[] = ['ethereum', 'arbitrum'];
@@ -315,6 +316,7 @@ export function ManageView() {
           </button>
         }
       />
+      <SuggestionsBanner />
       <div className="bento">
         {(showNew || !wallets.length) && <NewWallet autoFocus={showNew} onDone={() => setShowNew(false)} />}
         {wallets.map((w) => (
