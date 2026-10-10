@@ -1,0 +1,46 @@
+# ledgerline with Docker Compose: two services from the same image sharing ./data.
+#
+#   cp .env.example .env      # add your Alchemy URLs
+#   docker compose up -d --build
+#   open http://127.0.0.1:8790
+#
+# The web port is published on 127.0.0.1 only. There is no authentication: to reach the UI from
+# other devices, put a VPN such as Tailscale (`tailscale serve`) or an authenticating reverse proxy
+# in front of it instead of publishing the port publicly. WEB_PORT changes the host port.
+#
+# Linux hosts: the container runs as uid 1000 (user "node"); make ./data writable for it, e.g.
+#   mkdir -p data && sudo chown 1000:1000 data
+
+name: ledgerline
+
+x-app: &app
+  build: .
+  image: ledgerline:latest
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # fixed inside the container (overrides .env, which is written for running on the host)
+    DATABASE_PATH: ${LEDGERLINE_DATABASE_PATH:-/app/data/portfolio.db}
+    NODE_ENV: production
+    PORT: "8790"
+  volumes:
+    - ./data:/app/data
+
+services:
+  web:
+    <<: *app
+    command: ["node_modules/.bin/next", "start", "-H", "0.0.0.0", "-p", "8790"]
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8790}:8790"
+
+  worker:
+    <<: *app
+    command: ["node_modules/.bin/tsx", "worker/index.ts"]
+    # the worker has no HTTP port, so the image's web healthcheck does not apply
+    healthcheck:
+      disable: true
+    stop_grace_period: 30s
+    depends_on:
+      - web

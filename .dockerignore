@@ -1,0 +1,20 @@
+# keep the build context small and free of local state and secrets
+.git
+.github
+node_modules
+.next
+coverage
+data
+*.db
+*.db-*
+.env
+.env.*
+!.env.example
+ops
+docs
+design-ref
+.playwright-mcp
+**/.playwright-mcp
+tsconfig.tsbuildinfo
+*.log
+.DS_Store

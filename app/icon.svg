@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <style>
+    .tile { fill: #ffffff; stroke: #191814; stroke-opacity: .12; }
+    .rule { stroke: #191814; stroke-opacity: .2; }
+    .halo { fill: #ffffff; }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #1c1b18; stroke: #f5f3ee; stroke-opacity: .16; }
+      .rule { stroke: #f5f3ee; stroke-opacity: .24; }
+      .halo { fill: #1c1b18; }
+    }
+  </style>
+  <rect class="tile" x="2" y="2" width="60" height="60" rx="16" stroke-width="2"/>
+  <path class="rule" d="M15 23H49M15 33H49M15 43H49" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+  <path d="M15 44.5 L25.5 36.5 L33 39.5 L46.5 23.5" stroke="#ea5a1f" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle class="halo" cx="46.5" cy="23.5" r="7.5"/>
+  <circle cx="46.5" cy="23.5" r="5" fill="#ea5a1f"/>
+</svg>

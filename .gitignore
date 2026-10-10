@@ -1,0 +1,36 @@
+# dependencies and build output
+node_modules/
+.next/
+out/
+coverage/
+next-env.d.ts.bak
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# local data: SQLite databases, backups, WAL / SHM files
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# secrets: keep only the documented template
+.env
+.env.*
+!.env.example
+
+# private material that stays local (deployment, specs, plans, research, design references)
+ops/
+# docs/ is private by default; only README images are published
+docs/*
+!docs/images/
+design-ref/
+
+# tooling
+.playwright-mcp/
+**/.playwright-mcp/
+.vscode/
+.idea/
+.DS_Store
+*.log
+npm-debug.log*

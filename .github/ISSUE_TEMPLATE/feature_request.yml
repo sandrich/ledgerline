@@ -1,0 +1,44 @@
+name: Feature request
+description: Suggest an idea, a chain or a protocol
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the Roadmap in the README and existing issues first. One idea per issue, please.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the use case rather than the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should it work? Screens, numbers, data sources you have in mind.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - New chain
+        - New protocol
+        - Metrics / PnL / risk
+        - Activity ledger
+        - UI
+        - Self-hosting / operations
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to work on this myself

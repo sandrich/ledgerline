@@ -1,0 +1,67 @@
+{
+  "name": "ledgerline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted, DeBank-style portfolio tracker for Ethereum and Arbitrum: wallets, Aave v3 positions, PnL and full history in a local SQLite database.",
+  "keywords": [
+    "ethereum",
+    "arbitrum",
+    "portfolio",
+    "portfolio-tracker",
+    "defi",
+    "aave",
+    "self-hosted",
+    "nextjs",
+    "sqlite",
+    "crypto"
+  ],
+  "homepage": "https://github.com/sandrich/ledgerline#readme",
+  "bugs": {
+    "url": "https://github.com/sandrich/ledgerline/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sandrich/ledgerline.git"
+  },
+  "license": "MIT",
+  "author": "Chris Sandrini",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev -p ${PORT:-8790} -H ${HOST:-127.0.0.1}",
+    "build": "next build",
+    "start": "next start -p ${PORT:-8790} -H ${HOST:-127.0.0.1}",
+    "worker": "tsx worker/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_OPTIONS=--experimental-sqlite tsx --test lib/queries/__tests__/queries.test.ts lib/ledger/__tests__/classify.test.ts",
+    "scan-once": "tsx scripts/scan-once.ts",
+    "backfill": "tsx scripts/backfill.ts",
+    "hourly-backfill": "tsx scripts/hourly-backfill.ts",
+    "ledger-backfill": "tsx scripts/ledger-backfill.ts",
+    "seed-demo": "tsx scripts/seed-demo.ts",
+    "demo:data": "tsx scripts/demo-data.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "next": "15.5.4",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "tsx": "^4.20.5",
+    "viem": "^2.37.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "typescript": "^5.9.2"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "esbuild": true,
+    "sharp": true
+  }
+}

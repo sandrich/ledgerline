@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="ledgerline">
+  <style>
+    .tile { fill: #ffffff; stroke: #191814; stroke-opacity: .10; }
+    .rule { stroke: #191814; stroke-opacity: .16; }
+    .line { stroke: #ea5a1f; }
+    .dot { fill: #ea5a1f; }
+    .halo { fill: #ffffff; }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #1c1b18; stroke: #f5f3ee; stroke-opacity: .14; }
+      .rule { stroke: #f5f3ee; stroke-opacity: .20; }
+      .halo { fill: #1c1b18; }
+    }
+  </style>
+  <rect class="tile" x="2" y="2" width="60" height="60" rx="16" stroke-width="2"/>
+  <!-- the ledger: three ruled lines -->
+  <path class="rule" d="M15 23H49M15 33H49M15 43H49" stroke-width="3" stroke-linecap="round" fill="none"/>
+  <!-- the line: value rising across the ledger -->
+  <path class="line" d="M15 44.5 L25.5 36.5 L33 39.5 L46.5 23.5" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle class="halo" cx="46.5" cy="23.5" r="7"/>
+  <circle class="dot" cx="46.5" cy="23.5" r="4.5"/>
+</svg>
