@@ -704,3 +704,137 @@ export interface ScopePnlResponse {
   scope: string;
   pnl: PnlSummary;
 }
+
+// ---------- BOT REPORT: GET /api/bot/report (read-only, bearer token) ----------
+
+export type ReportWindow = '24h' | '7d' | '30d';
+
+/** One canonical asset (ETH and WETH merged) at the window start and now. */
+export interface ReportHolding {
+  /** canonical asset key, e.g. coingecko:ethereum */
+  key: string;
+  symbol: string;
+  chains: Chain[];
+  /** units held (wallet + supplied), >= 0 */
+  heldStart: number;
+  heldEnd: number;
+  /** units borrowed, >= 0 */
+  borrowedStart: number;
+  borrowedEnd: number;
+  /** net USD (debt negative) at the window start, valued at that time's price */
+  usdStart: number;
+  usdEnd: number;
+  /** usdEnd - usdStart */
+  usdChange: number;
+  /** USD per unit at the start (from the stored snapshot) and now; null when unpriced */
+  priceStart: number | null;
+  priceEnd: number | null;
+  /** fraction (0.031 = +3.1%); null when either price is missing */
+  priceChangePct: number | null;
+  /** new = not held at the start, closed = held at the start but not now, changed = units moved, price = only the price moved */
+  status: 'new' | 'closed' | 'changed' | 'price';
+}
+
+/** Aave or Curve position, with its health at the window start when it existed then. */
+export interface ReportPosition {
+  protocol: 'aave-v3' | 'curve-crvusd' | 'llamalend';
+  market: string;
+  chain: Chain;
+  address: string;
+  label: string | null;
+  /** USD, positive numbers */
+  collateralUsd: number;
+  debtUsd: number;
+  /** health factor scale, 1 = liquidation (Curve: 1 + health); null without debt */
+  healthFactor: number | null;
+  healthFactorStart: number | null;
+  /** fraction the most critical collateral price can fall before liquidation; null when unknown */
+  liquidationDropPct: number | null;
+  /** Curve only: part of the collateral is being converted (soft liquidation) */
+  softLiquidation?: boolean;
+}
+
+/** One transaction of the window, compacted for a bot. */
+export interface ReportTx {
+  ts: number;
+  chain: Chain;
+  kind: TxKind;
+  /** value moved in (+) or out (-) of the scope at the time, USD; 0 for internal; null when unpriced */
+  netUsd: number | null;
+  /** gas paid by a tracked address, positive USD, null when unknown */
+  feeUsd: number | null;
+  counterparty: string | null;
+  counterpartyLabel: string | null;
+  /** units always positive, `direction` says which way they moved for the scope */
+  transfers: { symbol: string; amount: number; usd: number | null; direction: 'in' | 'out' | 'internal' }[];
+  explorerUrl: string;
+}
+
+export interface ReportAlert {
+  level: 'info' | 'warning' | 'critical';
+  /** stable machine key, e.g. health-factor-low, data-stale */
+  code: string;
+  message: string;
+}
+
+/**
+ * Daily "what changed" report for bots. Every money field is USD unless it sits under `currency`.
+ * Debt is negative in net values (usdStart / usdEnd) and positive in debtUsd / borrowed fields.
+ */
+export interface BotReportResponse {
+  generatedAt: number;
+  scope: string;
+  window: ReportWindow;
+  /** window start used (now - window, or the first history point when history starts later) */
+  from: number;
+  to: number;
+  freshness: {
+    lastSnapshotAt: number | null;
+    workerHeartbeatAt: number | null;
+    /** true when the newest live snapshot is older than 1 hour: numbers may lag */
+    stale: boolean;
+    backfillComplete: boolean;
+    failedJobs: number;
+  };
+  netWorth: {
+    startUsd: number | null;
+    endUsd: number;
+    changeUsd: number | null;
+    /** fraction; null when the start is below $1 */
+    changePct: number | null;
+    /** positive numbers */
+    assetsUsd: number;
+    debtUsd: number;
+  };
+  /** holdings-based PnL of the window (same definitions as the overview: price PnL, interest, gas, other = deposits / withdrawals) */
+  pnl: PnlPeriod;
+  /** headline numbers in the requested display currency (amounts of that currency, not USD) */
+  currency: {
+    code: DisplayCurrency;
+    /** units of the currency per USD at the start and now; 1 for USD */
+    rateStart: number;
+    rateEnd: number;
+    start: number | null;
+    end: number;
+    change: number | null;
+    /** price PnL, currency effect and the rest, summing to change (USD: fxEffect 0) */
+    market: number | null;
+    fxEffect: number | null;
+  };
+  /** assets whose units or value changed, sorted by |usdChange| desc (max 25) */
+  holdings: ReportHolding[];
+  positions: ReportPosition[];
+  risk: Pick<RiskSummary, 'leverage' | 'ltvUsed' | 'netApy' | 'annualYieldUsd' | 'stableShare' | 'drawdownPct' | 'ath'>;
+  activity: {
+    /** transactions in the window (spam and approvals hidden), newest first */
+    count: number;
+    byKind: Partial<Record<TxKind, number>>;
+    /** at most 50, newest first */
+    items: ReportTx[];
+    /** true when more than `items` happened in the window */
+    truncated: boolean;
+    /** true while the ledger backfill is still running (activity may be incomplete) */
+    syncing: boolean;
+  };
+  alerts: ReportAlert[];
+}

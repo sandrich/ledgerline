@@ -38,7 +38,7 @@ backfill against the configured database. They hit real RPC endpoints.
 
 | Path | What lives there |
 |---|---|
-| `app/` | Pages (`/`, `/wallets`, `/wallets/[id]`, `/address/[address]`, `/transactions`) and `app/api/**/route.ts` handlers. `app/api/_lib/http.ts` has the shared JSON/error helpers |
+| `app/` | Pages (`/`, `/wallets`, `/wallets/[id]`, `/address/[address]`, `/transactions`) and `app/api/**/route.ts` handlers. `app/api/_lib/http.ts` has the shared JSON/error helpers, `app/api/_lib/bot-auth.ts` the bearer token check for `/api/bot/*` |
 | `components/views/` | Page-level views (portfolio, address, manage, transactions) and shared parts |
 | `components/charts/` | Hand-rolled SVG charts (area with the unleveraged line, multi-line for rates / FX, yield bars, sparkline, history card). No chart library |
 | `components/format.ts` | **All** display formatting and the stealth mask |
@@ -48,7 +48,7 @@ backfill against the configured database. They hit real RPC endpoints.
 | `lib/history/` | History side: archive RPC pool, Multicall3, daily backfill, hourly backfill, Aave reader, DefiLlama prices, canonical price keys, rollup and retention |
 | `lib/ledger/` | Activity ledger: raw sources (Transfer/Approval logs, `alchemy_getAssetTransfers`), ingest, classification, read model |
 | `lib/protocols/` | Protocol adapters beyond Aave: `curve-crvusd.ts` (Curve crvUSD mint markets and LlamaLend loans: market registry, per-address loan discovery from UserState logs, point reads used by live, daily and hourly) |
-| `lib/queries/` | Read models used by the API: scope parsing, aggregation and dedup across wallets, history series, PnL (`scope-pnl.ts` backs `GET /api/pnl?scope=` for list rows), risk, flows, yield / rates, suggestions |
+| `lib/queries/` | Read models used by the API: scope parsing, aggregation and dedup across wallets, history series, PnL (`scope-pnl.ts` backs `GET /api/pnl?scope=` for list rows), risk, flows, yield / rates, suggestions, `report.ts` (the bot "what changed" report) |
 | `lib/queries/api-types.ts` | **THE API contract** between route handlers and UI. Every response shape lives here |
 | `lib/db/` | `schema.sql`, versioned migrations (`migrate.ts`) and repositories (`repos-*.ts`) |
 | `worker/index.ts` | Scheduler (intervals from env, last run persisted in `meta`), two lanes (scan, history), heartbeat, graceful shutdown |
@@ -170,6 +170,8 @@ These definitions are deliberate. Do not "simplify" them into net-worth change.
   Multicall3) are fine.
 - Never commit databases (`data/`), logs, screenshots of a real portfolio or local planning notes.
 - The app has no authentication. Do not change the default bind address away from `127.0.0.1`.
+  The only exception is `/api/bot/*`: read-only and gated by `BOT_API_TOKEN` (`requireBotToken`).
+  Never add write endpoints there.
 
 ## PR checklist
 

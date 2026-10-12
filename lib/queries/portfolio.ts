@@ -106,7 +106,7 @@ export function currentState(db: QDb, addressIds: number[], now: number, tokens?
   };
 }
 
-function isHidden(st: CurrentState, b: BalanceRow): boolean {
+export function isHidden(st: CurrentState, b: BalanceRow): boolean {
   const t = tokenMeta(st.tokens, b.chain, b.token);
   if (t?.spam) return true;
   if (b.side !== 'wallet') return false;
@@ -333,7 +333,7 @@ export function addressSummaries(db: QDb, rows: AddressRow[], now: number, st?: 
 // ---------- views ----------
 
 /** FRONTEND: Curve loans of the current slices; [] when the Curve tables do not exist (tests, old DBs). */
-function curveOf(db: QDb, slices: SliceRef[], addresses?: Map<number, AddressRow>): CurvePositionInfo[] {
+export function curveOf(db: QDb, slices: SliceRef[], addresses?: Map<number, AddressRow>): CurvePositionInfo[] {
   if (!get(db, "SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = 'curve_positions'")) return [];
   try {
     return curvePositionInfos(db as unknown as Db, slices).map((c) => {

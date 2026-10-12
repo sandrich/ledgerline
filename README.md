@@ -48,6 +48,7 @@ leaves your server.
 - [Configuration](#configuration)
 - [Self-hosting](#self-hosting)
 - [Private access with Tailscale](#private-access-with-tailscale)
+- [Bot API (daily reports)](#bot-api-daily-reports)
 - [How the numbers work](#how-the-numbers-work)
 - [Limitations](#limitations)
 - [Roadmap](#roadmap)
@@ -227,6 +228,7 @@ Every variable is optional.
 | `HOURLY_BACKFILL_HOURS` | `168` | Hours of hourly history to backfill (7 days) |
 | `HOURLY_BACKFILL_INTERVAL_HOURS` | `6` | How often to check for missing hours |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+| `BOT_API_TOKEN` | unset | Bearer token for the read-only [bot API](#bot-api-daily-reports). Unset disables it. At least 24 characters |
 
 <details>
 <summary>Advanced settings</summary>
@@ -440,6 +442,52 @@ The app is then reachable at `https://ledgerline.<your-tailnet>.ts.net`.
 > [!CAUTION]
 > Never use **Tailscale Funnel** for ledgerline. Funnel exposes the app to the whole internet, and
 > ledgerline has no login: anyone with the URL would see your wallets and balances.
+
+## Bot API (daily reports)
+
+A read-only endpoint for bots and LLM agents (Grok, ChatGPT, n8n, a cron script, ...) that answers
+"what changed?" in one call: net worth, holdings-based PnL, per asset unit and price changes, Aave and
+Curve health factors then and now, the window's transactions and ready-made alerts.
+
+1. Generate a token and put it in `.env`, then restart the web app:
+
+   ```bash
+   echo "BOT_API_TOKEN=$(openssl rand -hex 32)" >> .env
+   ```
+
+2. Call it with the token as a bearer header (over Tailscale or on the same machine; keep the app
+   off the public internet):
+
+   ```bash
+   curl -s -H "Authorization: Bearer $BOT_API_TOKEN" \
+     "https://<your-host>/api/bot/report?window=24h&currency=CHF"
+   ```
+
+| Parameter | Values | Default |
+|---|---|---|
+| `scope` | `all`, `wallet:<id>`, `address:<0x...>` | `all` |
+| `window` | `24h`, `7d`, `30d` | `24h` |
+| `currency` | `USD`, `EUR`, `CHF` (headline figures under `currency`) | `USD` |
+
+The response (`BotReportResponse` in [`lib/queries/api-types.ts`](lib/queries/api-types.ts), every
+field documented) contains:
+
+- `freshness`: last snapshot, worker heartbeat, `stale` when the newest live snapshot is over an hour old
+- `netWorth` and `pnl`: start, end, change, price PnL, Aave interest, gas and deposits / withdrawals
+  (same definitions as the UI, see [How the numbers work](#how-the-numbers-work))
+- `currency`: the headline numbers in the requested currency, including the currency effect
+- `holdings`: per asset units held / borrowed and price at the start and now, status `new`, `closed`,
+  `changed` or `price` (only the price moved), largest USD change first
+- `positions`: lending positions with health factor now and at the start, distance to liquidation
+- `risk`, `activity` (transactions of the window, newest first) and `alerts` (`critical`, `warning`,
+  `info`, e.g. low health factor, stale data, new holdings)
+
+Money is in USD unless it sits under `currency`; debt is negative in net values. Responses without
+the right token get `401`; with `BOT_API_TOKEN` unset the endpoint answers `503`.
+
+A daily report prompt that works well: *"Fetch the report, lead with the alerts, then summarise the
+net worth change split into price PnL, interest, gas and deposits, and list holdings whose units
+changed."*
 
 ## How the numbers work
 
